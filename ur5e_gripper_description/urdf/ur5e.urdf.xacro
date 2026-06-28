@@ -1,0 +1,133 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="$(arg name)">
+   <!-- robot name -->
+   <xacro:arg name="name" default="ur"/>
+
+   <!-- import UR5e arm macro -->
+   <xacro:include filename="$(find ur5e_gripper_description)/urdf/ur_macro.xacro"/>
+
+   <!-- whether to attach gripper -->
+   <xacro:arg name="use_gripper" default="false"/>
+
+   <!-- UR5e arm parameters -->
+   <xacro:arg name="tf_prefix" default="" />
+   <xacro:arg name="joint_limit_params" default="$(find ur5e_gripper_description)/config/joint_limits.yaml"/>
+   <xacro:arg name="kinematics_params" default="$(find ur5e_gripper_description)/config/default_kinematics.yaml"/>
+   <xacro:arg name="physical_params" default="$(find ur5e_gripper_description)/config/physical_parameters.yaml"/>
+   <xacro:arg name="visual_params" default="$(find ur5e_gripper_description)/config/visual_parameters.yaml"/>
+   <xacro:arg name="safety_limits" default="false"/>
+   <xacro:arg name="safety_pos_margin" default="0.15"/>
+   <xacro:arg name="safety_k_position" default="20"/>
+   <xacro:arg name="use_fake_hardware" default="false" />
+   <xacro:arg name="headless_mode" default="false" />
+   <xacro:arg name="initial_positions_file" default="$(find ur5e_gripper_description)/config/initial_positions.yaml"/>
+
+   <!-- ros2_control parameters for arm -->
+   <xacro:arg name="robot_ip" default="0.0.0.0" />
+   <xacro:arg name="script_filename" default=""/>
+   <xacro:arg name="output_recipe_filename" default=""/>
+   <xacro:arg name="input_recipe_filename" default=""/>
+   <xacro:arg name="reverse_ip" default="0.0.0.0"/>
+   <xacro:arg name="script_command_port" default="50004"/>
+   <xacro:arg name="reverse_port" default="50001"/>
+   <xacro:arg name="script_sender_port" default="50002"/>
+   <xacro:arg name="trajectory_port" default="50003"/>
+
+   <!-- simulation parameters -->
+   <xacro:arg name="fake_sensor_commands" default="false" />
+   <xacro:arg name="sim_gazebo" default="false" />
+   <xacro:arg name="sim_ignition" default="false" />
+
+   <!-- gripper parameters -->
+   <xacro:arg name="gripper_com_port" default="/dev/ttyUSB0" />
+   <xacro:arg name="gripper_speed_multiplier" default="1.0" />
+   <xacro:arg name="gripper_force_multiplier" default="0.5" />
+
+   <!-- convert to property for substitution -->
+   <xacro:property name="initial_positions_file" default="$(arg initial_positions_file)"/>
+   <xacro:property name="is_sim_gazebo" value="$(arg sim_gazebo)"/>
+   <xacro:property name="is_sim_ignition" value="$(arg sim_ignition)"/>
+
+   <!-- world link -->
+   <link name="world" />
+
+   <xacro:if value="${is_sim_gazebo or is_sim_ignition}">
+     <link name="ground_plane">
+       <visual>
+         <origin rpy="0 0 0" xyz="0 0 0"/>
+         <geometry>
+           <box size="5 5 0"/>
+         </geometry>
+         <material name="ground_white">
+           <color rgba="1 1 1 0.5"/>
+         </material>
+       </visual>
+       <collision>
+         <origin rpy="0 0 0" xyz="0 0 0"/>
+         <geometry>
+           <box size="5 5 0"/>
+         </geometry>
+       </collision>
+     </link>
+     <joint name="ground_plane_joint" type="fixed">
+       <origin xyz="0 0 -0.01" rpy="0 0 0"/>
+       <parent link="world"/>
+       <child link="ground_plane"/>
+     </joint>
+   </xacro:if>
+
+   <!-- UR5e arm -->
+   <xacro:ur_robot
+     name="$(arg name)"
+     tf_prefix="$(arg tf_prefix)"
+     parent="world"
+     joint_limits_parameters_file="$(arg joint_limit_params)"
+     kinematics_parameters_file="$(arg kinematics_params)"
+     physical_parameters_file="$(arg physical_params)"
+     visual_parameters_file="$(arg visual_params)"
+     safety_limits="$(arg safety_limits)"
+     safety_pos_margin="$(arg safety_pos_margin)"
+     safety_k_position="$(arg safety_k_position)"
+     use_fake_hardware="$(arg use_fake_hardware)"
+     fake_sensor_commands="$(arg fake_sensor_commands)"
+     sim_gazebo="$(arg sim_gazebo)"
+     sim_ignition="$(arg sim_ignition)"
+     headless_mode="$(arg headless_mode)"
+     initial_positions="${xacro.load_yaml(initial_positions_file)}"
+     robot_ip="$(arg robot_ip)"
+     script_filename="$(arg script_filename)"
+     output_recipe_filename="$(arg output_recipe_filename)"
+     input_recipe_filename="$(arg input_recipe_filename)"
+     reverse_ip="$(arg reverse_ip)"
+     script_command_port="$(arg script_command_port)"
+     reverse_port="$(arg reverse_port)"
+     script_sender_port="$(arg script_sender_port)"
+     trajectory_port="$(arg trajectory_port)"
+     >
+     <origin xyz="0 0 0" rpy="0 0 0" />
+   </xacro:ur_robot>
+
+   <!-- Robotiq 2F-85 gripper (conditional) -->
+   <xacro:if value="$(arg use_gripper)">
+     <xacro:include filename="$(find ur5e_gripper_description)/urdf/robotiq_2f_85_macro.urdf.xacro"/>
+     <xacro:include filename="$(find ur5e_gripper_description)/urdf/2f_85.ros2_control.xacro"/>
+     <xacro:include filename="$(find ur5e_gripper_description)/urdf/ur_to_robotiq_adapter.urdf.xacro"/>
+
+     <xacro:ur_to_robotiq prefix="" parent="$(arg tf_prefix)tool0" child="robotiq_adapter_link"/>
+
+     <xacro:robotiq_gripper
+       name="RobotiqGripperHardwareInterface"
+       prefix=""
+       parent="robotiq_adapter_link"
+       use_fake_hardware="$(arg use_fake_hardware)"
+       include_ros2_control="true"
+       com_port="$(arg gripper_com_port)"
+       gripper_speed_multiplier="$(arg gripper_speed_multiplier)"
+       gripper_force_multiplier="$(arg gripper_force_multiplier)"
+       gripper_closed_position="0.0"
+       >
+       <origin xyz="0 0 0" rpy="0 0 0" />
+     </xacro:robotiq_gripper>
+   </xacro:if>
+
+</robot>
