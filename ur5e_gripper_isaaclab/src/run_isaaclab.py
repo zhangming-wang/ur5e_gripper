@@ -1,9 +1,11 @@
 """
 Launch Isaac Lab with the UR5e + Robotiq 2F-85 USD stage.
+IsaacLab hosts FollowJointTrajectory action server — MoveIt plans, IsaacLab executes.
 """
 
 import argparse
 from isaaclab.app import AppLauncher
+import set_isaaclab_env
 
 # ----------------------------------------------------------------------
 # 1. Args
@@ -23,6 +25,9 @@ simulation_app = app_launcher.app
 # 3. Imports after App
 # ----------------------------------------------------------------------
 import torch
+import rclpy
+from rclpy.executors import SingleThreadedExecutor
+
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import AssetBaseCfg
@@ -30,6 +35,8 @@ from isaaclab.assets.articulation import ArticulationCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.utils import configclass
 from pathlib import Path
+
+from control_node import ControlNode
 
 # ----------------------------------------------------------------------
 # 4. Config
@@ -96,8 +103,8 @@ class SceneCfg(InteractiveSceneCfg):
                     "wrist_2_joint": 3.14,
                     "wrist_3_joint": 3.14,
                 },
-                stiffness=800.0,
-                damping=40.0,
+                stiffness=10000.0,
+                damping=400.0,
             ),
             "ur5e_gripper": ImplicitActuatorCfg(
                 joint_names_expr=[
@@ -122,16 +129,20 @@ class SceneCfg(InteractiveSceneCfg):
 # ----------------------------------------------------------------------
 class MainLoop:
     def __init__(self):
+        self.control_node = None
         try:
             self.init()
             self.exec()
         except Exception as e:
             print(f"[INFO] Simulation interrupted: {e}")
         finally:
+            self.shutdown()
             simulation_app.close()
             print("-------------------exit-------------------")
 
     def init(self):
+        rclpy.init(args=None)
+
         sim_cfg = sim_utils.SimulationCfg(dt=0.01, device=args_cli.device)
         self.sim = sim_utils.SimulationContext(sim_cfg)
         self.sim.set_camera_view((2.0, 2.0, 1.5), (0.0, 0.0, 0.5))
@@ -142,16 +153,67 @@ class MainLoop:
         self.sim.reset()
 
         self.ur5e = self.scene["ur5e"]
-        # print(f"[INFO] UR5e joints: {self.ur5e.data.joint_names}")
-        # print(f"[INFO] UR5e joint count: {self.ur5e.num_joints}")
+        joint_names = list(self.ur5e.data.joint_names)
+        num_joints = self.ur5e.num_joints
 
+        print(f"\n===== UR5e + Robotiq 2F-85 关节信息 =====")
+        for i, name in enumerate(joint_names):
+            print(f"  [{i:2d}] {name}")
+        print(f"总关节数: {num_joints}\n")
+
+        self.ros_executor = SingleThreadedExecutor()
+        self.control_node = ControlNode(self, joint_names)
+        self.ros_executor.add_node(self.control_node)
+
+        self._init_robot()
 
     def exec(self):
         print("[INFO] Simulation running. Press Ctrl+C to stop.")
+
         while simulation_app.is_running():
+            # 1. ROS2 事件处理（接收桥接节点发的轨迹/夹爪指令）
+            self.ros_executor.spin_once(timeout_sec=0.0)
+
+            # 2. 轨迹插值 + 夹爪
+            self.control_node.step_traj()
+            self.control_node.step_gripper()
+
+            # 3. 读取物理状态，发布 /joint_states
+            self.control_node.current_pos = self.ur5e.data.joint_pos[0].cpu().numpy()
+            self.control_node.publish_joint_state()
+
+            # 4. 应用目标位置到仿真
+            target = torch.from_numpy(self.control_node.target_pos).to(self.sim.device).unsqueeze(0)
+            self.ur5e.set_joint_position_target(target)
+
+            # 5. 物理步进
             self.scene.write_data_to_sim()
             self.scene.update(self.sim_dt)
             self.sim.step()
+
+    def shutdown(self):
+        if self.control_node is not None:
+            self.control_node.destroy_node()
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass  # SIGTERM 时 rclpy 可能已经 shutdown 了
+
+    def _init_robot(self):
+        """传送到初始位姿并设目标"""
+        p = self.control_node.init_pos.copy()
+        self.ur5e.write_joint_state_to_sim(
+            torch.from_numpy(p).to(self.sim.device).unsqueeze(0),
+            torch.zeros(1, self.ur5e.num_joints, device=self.sim.device))
+        self.ur5e.set_joint_position_target(
+            torch.from_numpy(p).to(self.sim.device).unsqueeze(0))
+        self.control_node.current_pos = p.copy()
+        self.control_node.target_pos = p.copy()
+
+    def reset_env(self):
+        self._init_robot()
+        print("[INFO]: 仿真环境已重置")
 
 
 if __name__ == "__main__":

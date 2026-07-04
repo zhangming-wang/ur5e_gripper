@@ -62,7 +62,6 @@ def launch_setup(context, *args, **kwargs):
     prefix = LaunchConfiguration("prefix")
     use_sim_time = LaunchConfiguration("use_sim_time")
     launch_rviz = LaunchConfiguration("launch_rviz")
-    launch_servo = LaunchConfiguration("launch_servo")
     robot_ip = LaunchConfiguration("robot_ip")
     use_fake_hardware = LaunchConfiguration("use_fake_hardware")
     use_gripper = LaunchConfiguration("use_gripper")
@@ -179,7 +178,7 @@ def launch_setup(context, *args, **kwargs):
     ompl_planning_pipeline_config = {
         "move_group": {
             "planning_plugin": "ompl_interface/OMPLPlanner",
-            "request_adapters": """default_planner_request_adapters/AddTimeOptimalParameterization default_planner_request_adapters/FixWorkspaceBounds default_planner_request_adapters/FixStartStateBounds default_planner_request_adapters/FixStartStateCollision default_planner_request_adapters/FixStartStatePathConstraints""",
+            "request_adapters": """default_planner_request_adapters/AddTimeOptimalParameterization default_planner_request_adapters/ResolveConstraintFrames default_planner_request_adapters/FixWorkspaceBounds default_planner_request_adapters/FixStartStateBounds default_planner_request_adapters/FixStartStateCollision default_planner_request_adapters/FixStartStatePathConstraints""",
             "start_state_max_bounds_error": 0.1,
         }
     }
@@ -192,12 +191,6 @@ def launch_setup(context, *args, **kwargs):
     controllers_yaml = load_yaml(
         str(moveit_config_package.perform(context)), "config/controllers.yaml"
     )
-    # the scaled_joint_trajectory_controller does not work on fake hardware
-    change_controllers = context.perform_substitution(use_sim_time)
-    use_fake = context.perform_substitution(use_fake_hardware)
-    if change_controllers == "true" or use_fake == "true":
-        controllers_yaml["scaled_joint_trajectory_controller"]["default"] = False
-        controllers_yaml["joint_trajectory_controller"]["default"] = True
 
     moveit_controllers = {
         "moveit_simple_controller_manager": controllers_yaml,
@@ -280,69 +273,10 @@ def launch_setup(context, *args, **kwargs):
         ],
     )
 
-    # Servo node for realtime control
-    servo_yaml = load_yaml(
-        str(moveit_config_package.perform(context)), "config/ur_servo.yaml"
-    )
-    servo_params = {"moveit_servo": servo_yaml}
-    servo_node = Node(
-        package="moveit_servo",
-        condition=IfCondition(launch_servo),
-        executable="servo_node_main",
-        parameters=[
-            servo_params,
-            robot_description,
-            robot_description_semantic,
-        ],
-        output="screen",
-    )
-
-    # ros2_control infrastructure for fake hardware
-    ros2_controllers_config = PathJoinSubstitution(
-        [FindPackageShare(moveit_config_package), "config", "ros2_controllers.yaml"]
-    )
-    controller_manager_node = Node(
-        package="controller_manager",
-        executable="ros2_control_node",
-        condition=IfCondition(use_fake_hardware),
-        parameters=[
-            robot_description,
-            ros2_controllers_config,
-            {"use_sim_time": use_sim_time},
-        ],
-        output="screen",
-    )
-
-    joint_state_broadcaster_spawner = Node(
-        package="controller_manager",
-        executable="spawner",
-        condition=IfCondition(use_fake_hardware),
-        arguments=["joint_state_broadcaster", "-c", "/controller_manager"],
-    )
-
-    joint_trajectory_controller_spawner = Node(
-        package="controller_manager",
-        executable="spawner",
-        condition=IfCondition(use_fake_hardware),
-        arguments=["joint_trajectory_controller", "-c", "/controller_manager"],
-    )
-
-    robotiq_gripper_controller_spawner = Node(
-        package="controller_manager",
-        executable="spawner",
-        condition=IfCondition(use_gripper),
-        arguments=["robotiq_gripper_controller", "-c", "/controller_manager"],
-    )
-
     nodes_to_start = [
         robot_state_publisher_node,
         move_group_node,
         rviz_node,
-        servo_node,
-        controller_manager_node,
-        joint_state_broadcaster_spawner,
-        joint_trajectory_controller_spawner,
-        robotiq_gripper_controller_spawner,
     ]
 
     return nodes_to_start
@@ -443,9 +377,6 @@ def generate_launch_description():
     )
     declared_arguments.append(
         DeclareLaunchArgument("launch_rviz", default_value="true", description="Launch RViz?")
-    )
-    declared_arguments.append(
-        DeclareLaunchArgument("launch_servo", default_value="true", description="Launch Servo?")
     )
     declared_arguments.append(
         DeclareLaunchArgument(

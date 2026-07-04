@@ -1,0 +1,5 @@
+string command_type   # "pose" / "joints" / "gripper"
+string data            # args
+---
+bool success
+string message

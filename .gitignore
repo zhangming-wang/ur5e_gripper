@@ -72,3 +72,4 @@ install/
 log/
 .claude/
 .vscode/
+__pycache__/

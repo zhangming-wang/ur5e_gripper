@@ -69,6 +69,16 @@
     <disable_collisions link1="${prefix}robotiq_85_base_link" link2="${prefix}robotiq_85_right_finger_link" reason="Never" />
     <disable_collisions link1="${prefix}robotiq_85_base_link" link2="${prefix}robotiq_85_left_finger_tip_link" reason="Never" />
     <disable_collisions link1="${prefix}robotiq_85_base_link" link2="${prefix}robotiq_85_right_finger_tip_link" reason="Never" />
+    <!-- Gripper all links vs forearm (夹爪靠近前臂时不应误报碰撞) -->
+    <disable_collisions link1="${prefix}robotiq_85_left_knuckle_link" link2="${prefix}forearm_link" reason="Never" />
+    <disable_collisions link1="${prefix}robotiq_85_right_knuckle_link" link2="${prefix}forearm_link" reason="Never" />
+    <disable_collisions link1="${prefix}robotiq_85_left_inner_knuckle_link" link2="${prefix}forearm_link" reason="Never" />
+    <disable_collisions link1="${prefix}robotiq_85_right_inner_knuckle_link" link2="${prefix}forearm_link" reason="Never" />
+    <disable_collisions link1="${prefix}robotiq_85_left_finger_link" link2="${prefix}forearm_link" reason="Never" />
+    <disable_collisions link1="${prefix}robotiq_85_right_finger_link" link2="${prefix}forearm_link" reason="Never" />
+    <disable_collisions link1="${prefix}robotiq_85_left_finger_tip_link" link2="${prefix}forearm_link" reason="Never" />
+    <disable_collisions link1="${prefix}robotiq_85_right_finger_tip_link" link2="${prefix}forearm_link" reason="Never" />
+
     <disable_collisions link1="${prefix}robotiq_85_left_knuckle_link" link2="${prefix}robotiq_85_right_knuckle_link" reason="Never" />
     <disable_collisions link1="${prefix}robotiq_85_left_knuckle_link" link2="${prefix}robotiq_85_left_finger_link" reason="Never" />
     <disable_collisions link1="${prefix}robotiq_85_right_knuckle_link" link2="${prefix}robotiq_85_right_finger_link" reason="Never" />
