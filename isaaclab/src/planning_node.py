@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""规划节点 — 逆解/正解/夹爪，绝对/相对，输入角度(度)
+"""规划节点 — 逆解/正解/夹爪
+  xyz 单位米, roll/pitch/yaw 单位度, 关节角单位度
 
 ros2 service call /plan_execute ur5e_gripper_msgs/srv/PlanExecute \
   "{command_type: ik_rel, data: '0.1 0 0 0 0 0'}"
@@ -73,50 +74,49 @@ class PlanningNode(Node):
     # Arm
     # ------------------------------------------------------------------
 
-    async def _handle_arm(self, cmd, data, response):
-        parts = [math.radians(float(x)) for x in data.split()]
+    def _parse_arm(self, data):
+        """Parse 6 space-separated floats. Returns raw values (no unit conversion)."""
+        return [float(x) for x in data.split()]
 
-        if cmd == "fk_abs":
-            if len(parts) != 6:
-                response.success = False
-                response.message = f"Need 6 joint angles, got {len(parts)}"
-                return response
-            traj = self._arm.plan(joint_positions=parts)
-            return await self._finish_plan(traj, response)
-        elif cmd == "fk_rel":
-            if len(parts) != 6:
-                response.success = False
-                response.message = f"Need 6 joint deltas, got {len(parts)}"
-                return response
-            target = [c + d for c, d in zip(self._current_joints, parts)]
-            traj = self._arm.plan(joint_positions=target)
-            return await self._finish_plan(traj, response)
-        elif cmd == "ik_abs":
-            if len(parts) != 6:
-                response.success = False
-                response.message = f"Need x y z roll pitch yaw, got {len(parts)}"
-                return response
-            pos, rpy = parts[:3], parts[3:]
-            traj = self._arm.plan(position=pos, quat_xyzw=self._rpy_to_quat(*rpy),
-                                  cartesian=True, max_step=0.01)
-            return await self._finish_plan(traj, response)
-        elif cmd == "ik_rel":
-            if len(parts) != 6:
-                response.success = False
-                response.message = f"Need dx dy dz droll dpitch dyaw, got {len(parts)}"
-                return response
-            fk = self._arm.compute_fk(self._current_joints, fk_link_names=["tool0"])
-            if fk is None or not fk:
-                response.success = False; response.message = "FK failed"; return response
-            cur = fk[0] if isinstance(fk, list) else fk
-            new_pos = [cur.pose.position.x + parts[0],
-                       cur.pose.position.y + parts[1],
-                       cur.pose.position.z + parts[2]]
-            cur_rpy = self._quat_to_rpy(cur.pose.orientation)
-            new_rpy = [cur_rpy[i] + parts[3 + i] for i in range(3)]
-            traj = self._arm.plan(position=new_pos, quat_xyzw=self._rpy_to_quat(*new_rpy),
-                                  cartesian=True, max_step=0.01)
-            return await self._finish_plan(traj, response)
+    async def _handle_arm(self, cmd, data, response):
+        raw = self._parse_arm(data)
+        if len(raw) != 6:
+            response.success = False
+            response.message = f"Need 6 values, got {len(raw)}"
+            return response
+
+        if cmd in ("fk_abs", "fk_rel"):
+            # all 6 are joint angles in degrees → radians
+            parts = [math.radians(v) for v in raw]
+            if cmd == "fk_abs":
+                traj = self._arm.plan(joint_positions=parts)
+                return await self._finish_plan(traj, response)
+            else:  # fk_rel
+                target = [c + d for c, d in zip(self._current_joints, parts)]
+                traj = self._arm.plan(joint_positions=target)
+                return await self._finish_plan(traj, response)
+
+        elif cmd in ("ik_abs", "ik_rel"):
+            # first 3 are position in meters, last 3 are rpy in degrees → radians
+            pos_raw = raw[:3]        # meters, no conversion
+            rpy = [math.radians(v) for v in raw[3:]]
+            if cmd == "ik_abs":
+                traj = self._arm.plan(position=pos_raw, quat_xyzw=self._rpy_to_quat(*rpy),
+                                      cartesian=True, max_step=0.01)
+                return await self._finish_plan(traj, response)
+            else:  # ik_rel
+                fk = self._arm.compute_fk(self._current_joints, fk_link_names=["tool0"])
+                if fk is None or not fk:
+                    response.success = False; response.message = "FK failed"; return response
+                cur = fk[0] if isinstance(fk, list) else fk
+                new_pos = [cur.pose.position.x + pos_raw[0],
+                           cur.pose.position.y + pos_raw[1],
+                           cur.pose.position.z + pos_raw[2]]
+                cur_rpy = self._quat_to_rpy(cur.pose.orientation)
+                new_rpy = [cur_rpy[i] + rpy[i] for i in range(3)]
+                traj = self._arm.plan(position=new_pos, quat_xyzw=self._rpy_to_quat(*new_rpy),
+                                      cartesian=True, max_step=0.01)
+                return await self._finish_plan(traj, response)
 
     async def _finish_plan(self, traj, response):
         if traj is None:
@@ -193,11 +193,15 @@ def main():
     node = PlanningNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

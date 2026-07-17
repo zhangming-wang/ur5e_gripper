@@ -4,6 +4,8 @@ IsaacLab hosts FollowJointTrajectory action server — MoveIt plans, IsaacLab ex
 """
 
 import argparse
+from pathlib import Path
+
 from isaaclab.app import AppLauncher
 import set_isaaclab_env
 
@@ -14,6 +16,7 @@ parser = argparse.ArgumentParser(description="UR5e + Robotiq 2F-85 in Isaac Lab"
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+args_cli.enable_cameras = True  # 必须启用，否则相机不渲染
 
 # ----------------------------------------------------------------------
 # 2. Launch App — MUST come before other imports
@@ -28,24 +31,40 @@ import torch
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
 
+import omni
+import omni.replicator.core as rep
+import omni.syntheticdata._syntheticdata as sd
+from isaacsim.core.utils import extensions  # type: ignore
+
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.assets.articulation import ArticulationCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
+from isaaclab.sensors import Camera, CameraCfg
 from isaaclab.utils import configclass
-from pathlib import Path
 
 from control_node import ControlNode
+
+extensions.enable_extension("isaacsim.ros2.bridge")
 
 # ----------------------------------------------------------------------
 # 4. Config
 # ----------------------------------------------------------------------
 project_root = Path(__file__).resolve().parent.parent
 _robot_usd_path = project_root / "urdf/ur5e_with_gripper/ur5e_with_gripper.usd"
+_desk_usd_path = project_root / "usd/desk/model_desk.usd"
+_tray_usd_path = project_root / "usd/tray/model_redtray.usd"
+_gemini2_usd_path = project_root / "usd/Gemini2/World0.usd"
 
-if not _robot_usd_path.exists():
-    raise FileNotFoundError(f"Robot USD not found: {_robot_usd_path}")
+for _p, _n in [
+    (_robot_usd_path, "Robot"),
+    (_desk_usd_path, "Desk"),
+    (_tray_usd_path, "Tray"),
+    (_gemini2_usd_path, "Gemini2"),
+]:
+    if not _p.exists():
+        raise FileNotFoundError(f"{_n} USD not found: {_p}")
 
 
 @configclass
@@ -61,6 +80,79 @@ class SceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75)),
     )
 
+    # ---- 静态场景资产 ----
+    desk = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/desk",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=str(_desk_usd_path),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=True,
+                kinematic_enabled=True,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                collision_enabled=True,
+            ),
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(0.0, 0.0, 0.0),
+            rot=(0.707, 0.0, 0.0, 0.707),
+        ),
+    )
+
+    left_tray = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/left_tray",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=str(_tray_usd_path),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=True,
+                kinematic_enabled=True,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                collision_enabled=True,
+            ),
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(0.0, 0.5, 0.7),
+            rot=(1.0, 0.0, 0.0, 0.0),
+        ),
+    )
+
+    right_tray = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/right_tray",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=str(_tray_usd_path),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=True,
+                kinematic_enabled=True,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                collision_enabled=True,
+            ),
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(0.0, -0.5, 0.7),
+            rot=(1.0, 0.0, 0.0, 0.0),
+        ),
+    )
+
+    gemini2 = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/gemini2",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=str(_gemini2_usd_path),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=True,
+                kinematic_enabled=True,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                collision_enabled=True,
+            ),
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(0.0, 0.5, 1.5),
+            rot=(0.0, 1.0, 0.0, 0.0),
+        ),
+    )
+
     ur5e = ArticulationCfg(
         prim_path="{ENV_REGEX_NS}/ur5e",
         spawn=sim_utils.UsdFileCfg(
@@ -74,7 +166,7 @@ class SceneCfg(InteractiveSceneCfg):
             ),
         ),
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.0),
+            pos=(0.0, 0.0, 0.7),
             rot=(1.0, 0.0, 0.0, 0.0),
         ),
         actuators={
@@ -136,12 +228,16 @@ class MainLoop:
         except Exception as e:
             print(f"[INFO] Simulation interrupted: {e}")
         finally:
-            self.shutdown()
+            if self.control_node is not None:
+                self.control_node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
             simulation_app.close()
             print("-------------------exit-------------------")
 
     def init(self):
-        rclpy.init(args=None)
+        if not rclpy.ok():
+            rclpy.init(args=None)
 
         sim_cfg = sim_utils.SimulationCfg(dt=0.01, device=args_cli.device)
         self.sim = sim_utils.SimulationContext(sim_cfg)
@@ -166,54 +262,120 @@ class MainLoop:
         self.ros_executor.add_node(self.control_node)
 
         self._init_robot()
+        self._setup_gemini2_cameras()
 
     def exec(self):
         print("[INFO] Simulation running. Press Ctrl+C to stop.")
 
         while simulation_app.is_running():
-            # 1. ROS2 事件处理（接收桥接节点发的轨迹/夹爪指令）
             self.ros_executor.spin_once(timeout_sec=0.0)
 
-            # 2. 轨迹插值 + 夹爪
             self.control_node.step_traj()
             self.control_node.step_gripper()
 
-            # 3. 读取物理状态，发布 /joint_states
             self.control_node.current_pos = self.ur5e.data.joint_pos[0].cpu().numpy()
             self.control_node.publish_joint_state()
 
-            # 4. 应用目标位置到仿真
-            target = torch.from_numpy(self.control_node.target_pos).to(self.sim.device).unsqueeze(0)
+            target = (
+                torch.from_numpy(self.control_node.target_pos)
+                .to(self.sim.device)
+                .unsqueeze(0)
+            )
             self.ur5e.set_joint_position_target(target)
 
-            # 5. 物理步进
             self.scene.write_data_to_sim()
             self.scene.update(self.sim_dt)
+            for cam in self.gemini2_cameras:
+                cam.update(self.sim_dt)
+
             self.sim.step()
 
-    def shutdown(self):
-        if self.control_node is not None:
-            self.control_node.destroy_node()
-        try:
-            if rclpy.ok():
-                rclpy.shutdown()
-        except Exception:
-            pass  # SIGTERM 时 rclpy 可能已经 shutdown 了
-
     def _init_robot(self):
-        """传送到初始位姿并设目标"""
         p = self.control_node.init_pos.copy()
         self.ur5e.write_joint_state_to_sim(
             torch.from_numpy(p).to(self.sim.device).unsqueeze(0),
-            torch.zeros(1, self.ur5e.num_joints, device=self.sim.device))
+            torch.zeros(1, self.ur5e.num_joints, device=self.sim.device),
+        )
         self.ur5e.set_joint_position_target(
-            torch.from_numpy(p).to(self.sim.device).unsqueeze(0))
+            torch.from_numpy(p).to(self.sim.device).unsqueeze(0)
+        )
         self.control_node.current_pos = p.copy()
         self.control_node.target_pos = p.copy()
 
     def reset_env(self):
         self._init_robot()
         print("[INFO]: 仿真环境已重置")
+
+    # ==================================================================
+    # Gemini2 相机 ROS2 发布
+    # ==================================================================
+
+    def _setup_gemini2_cameras(self):
+        """用 isaaclab.sensors.Camera + rep.writers 发布 Gemini2 的 4 路流"""
+        num_envs = self.scene.num_envs
+
+        # (Camera prim 名称,     数据类型,   topic,                   分辨率)
+        streams = [
+            ("camera_rgb/camera_rgb/Stream_rgb", "rgb", "gemini2/rgb", 1280, 720),
+            (
+                "camera_ir_left/camera_left/Stream_depth",
+                "depth",
+                "gemini2/depth_left",
+                640,
+                400,
+            ),
+            (
+                "camera_ir_left/camera_left/Stream_ir_left",
+                "rgb",
+                "gemini2/ir_left",
+                640,
+                400,
+            ),
+            (
+                "camera_ir_right/camera_right/Stream_ir_right",
+                "rgb",
+                "gemini2/ir_right",
+                640,
+                400,
+            ),
+        ]
+
+        self.gemini2_cameras = []
+
+        for env_i in range(num_envs):
+            base = f"/World/envs/env_{env_i}/gemini2/Orbbec_Gemini2"
+
+            for cam_rel, data_type, topic_base, w, h in streams:
+                cam = Camera(
+                    CameraCfg(
+                        prim_path=f"{base}/{cam_rel}",
+                        data_types=[data_type],
+                        spawn=None,
+                        width=w,
+                        height=h,
+                    )
+                )
+                cam._initialize_impl()
+                self.gemini2_cameras.append(cam)
+
+                # ROS2 publisher
+                sensor_type = (
+                    sd.SensorType.Rgb
+                    if data_type == "rgb"
+                    else sd.SensorType.DistanceToImagePlane
+                )
+                rv = omni.syntheticdata.SyntheticData.convert_sensor_type_to_rendervar(
+                    sensor_type.name
+                )
+                writer = rep.writers.get(rv + "ROS2PublishImage")
+                topic = f"/env_{env_i}/{topic_base}"
+                writer.initialize(
+                    topicName=topic, frameId=f"gemini2_e{env_i}_{data_type}"
+                )
+                writer.attach([cam._render_product_paths[0]])
+                print(f"[INFO] {data_type:5s} → {topic}")
+
+        print(f"[INFO] Gemini2 cameras: {num_envs} env × {len(streams)} streams")
 
 
 if __name__ == "__main__":

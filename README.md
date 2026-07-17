@@ -1,132 +1,153 @@
 # ur5e_gripper
 
-UR5e 机械臂 + Robotiq 2F-85 自适应夹爪的 ROS 2 Humble 仿真项目，自包含、可直接编译运行。
+UR5e 机械臂 + Robotiq 2F-85 自适应夹爪的 ROS 2 Humble 仿真项目，集成 Isaac Lab 物理仿真。
 
 ## 项目结构
 
 ```
 ur5e_gripper/
-├── ur5e_gripper_description/       # 机器人描述（URDF/XACRO + 网格）
-│   ├── config/                     # UR5e 运动学/关节限位/物理/视觉参数
-│   ├── urdf/                       # XACRO 描述文件
-│   │   ├── ur5e.urdf.xacro         # ★ 入口（use_gripper:=true/false 切换）
-│   │   ├── ur_macro.xacro          # 臂宏定义
-│   │   ├── ur.ros2_control.xacro   # 臂 ros2_control
-│   │   ├── inc/                    # 公共 XACRO 片段
-│   │   └── robotiq_2f_85_macro.urdf.xacro  # 夹爪宏定义
-│   ├── meshes/ur5e/                # UR5e 网格
-│   ├── meshes/robotiq/             # 2F-85 网格
-│   └── launch/                     # 可视化启动
-├── ur5e_gripper_moveit_config/     # MoveIt 2 配置与启动
-│   ├── config/                     # 运动规划/控制器/SRDF 参数
-│   ├── srdf/                       # 碰撞禁对（臂 + 夹爪）
-│   └── launch/moveit.launch.py     # ★ 主启动文件
-├── ur5e_gripper_isaaclab/          # Isaac Lab 仿真集成
-│   ├── urdf/                       # 纯 URDF + mesh + 导入生成的 USD
-│   └── src/run_isaaclab.py         # ★ Isaac Lab 启动脚本
-├── .gitignore
-├── LICENSE
+├── src/                              # ROS 2 包
+│   ├── ur5e_gripper_description/     # 机器人描述（URDF/XACRO + 网格）
+│   ├── ur5e_gripper_moveit_config/   # MoveIt 2 配置与启动
+│   ├── ur5e_gripper_msgs/            # 自定义服务定义
+│   └── pymoveit2/                    # Python MoveIt 2 接口
+├── isaaclab/src/                     # Isaac Lab 控制 / 规划 / 桥接节点
+│   ├── bridge_node.py                # MoveIt ↔ IsaacLab 桥接
+│   ├── planning_node.py              # 逆解/正解/夹爪规划服务
+│   ├── control_node.py               # IsaacLab 物理执行
+│   └── run_isaaclab.py               # IsaacLab 仿真入口
+├── script/
+│   └── ur5e_gripper_panel.py         # PySide6 调试面板
+├── run.sh                            # 一键启动 (MoveIt + Bridge + Planning + IsaacLab)
+├── install/                          # colcon 编译产物
 └── README.md
 ```
 
 ## 依赖
 
 ```bash
-# 基础 ROS 2 Humble
-sudo apt install ros-humble-ros-base ros-humble-moveit
+# ROS 2 Humble
+sudo apt install ros-humble-ros-base ros-humble-moveit ros-humble-ros2-control ros-humble-ros2-controllers
 
-# 仿真控制器
-sudo apt install ros-humble-ros2-control ros-humble-ros2-controllers
+# PySide6 (GUI 测试面板)
+pip3 install PySide6
 ```
 
 ## 编译
 
 ```bash
-cd ~/work/Universal_Robots
+cd ~/work/ur5e_gripper
+source /opt/ros/humble/setup.bash
 colcon build --symlink-install
-source install/setup.bash
 ```
 
-## 使用
-
-### 可视化（RViz 查看模型）
+## 一键启动
 
 ```bash
-ros2 launch ur5e_gripper_description description.launch.xml
+./run.sh
 ```
 
-### 臂-only 运动规划仿真
+启动 4 个进程：MoveIt → Bridge → Planning → IsaacLab。按 `Ctrl+C` 全部停止。
+
+---
+
+## 测试命令
+
+先确保 `run.sh` 已启动且 `planning_node` 显示 `Planning node ready`，然后新开终端：
 
 ```bash
-ros2 launch ur5e_gripper_moveit_config moveit.launch.py \
-  use_fake_hardware:=true \
-  launch_servo:=false
+source /opt/ros/humble/setup.bash
+source ~/work/ur5e_gripper/install/setup.bash
 ```
 
-### 臂 + 夹爪运动规划仿真
+### 机械臂 — IK 笛卡尔空间
 
 ```bash
-ros2 launch ur5e_gripper_moveit_config moveit.launch.py \
-  use_fake_hardware:=true \
-  use_gripper:=true \
-  launch_servo:=false
+# 相对移动: 沿 X 轴 +10cm（xyz 单位米, rpy 单位度）
+ros2 service call /plan_execute ur5e_gripper_msgs/srv/PlanExecute \
+  "{command_type: ik_rel, data: '0.1 0 0 0 0 0'}"
 ```
 
-### 控制夹爪
-
 ```bash
-# 张开
-ros2 action send_goal /robotiq_gripper_controller/gripper_cmd \
-  control_msgs/action/GripperCommand "{command: {position: 0.0, max_effort: 50.0}}"
-
-# 闭合
-ros2 action send_goal /robotiq_gripper_controller/gripper_cmd \
-  control_msgs/action/GripperCommand "{command: {position: 0.8, max_effort: 50.0}}"
+# 绝对位姿
+ros2 service call /plan_execute ur5e_gripper_msgs/srv/PlanExecute \
+  "{command_type: ik_abs, data: '0.3 -0.2 0.4 180 0 90'}"
 ```
 
-> `position` 范围：0.0（张开）～ 0.8（闭合）
-
-## 启动参数
-
-| 参数 | 默认 | 说明 |
-|---|---|---|
-| `use_fake_hardware` | `false` | 使用 mock_components 仿真硬件 |
-| `use_gripper` | `false` | 挂载 Robotiq 2F-85 夹爪 |
-| `launch_servo` | `true` | MoveIt 伺服遥操作（仿真可关） |
-| `launch_rviz` | `true` | 启动 RViz |
-| `robot_ip` | `yyy` | 机械臂 IP（仿真忽略） |
-| `safety_limits` | `true` | 关节安全限位 |
-
-## 与官方仓库的关系
-
-本项目从 [Universal_Robots_ROS2_Description](https://github.com/UniversalRobots/Universal_Robots_ROS2_Description) 和 [ros2_robotiq_gripper](https://github.com/PickNikRobotics/ros2_robotiq_gripper) 的 `humble` 分支提取，精简为 UR5e + 2F-85 单机器人配置。XACRO、控制器配置与官方保持一致，差异仅为：
-
-- 包名改为 `ur5e_gripper_*`（自包含）
-- 夹爪网格随项目分发（不依赖外部包）
-- SRDF 增加了适配器和夹爪的碰撞禁对（官方无夹爪）
-
-### Isaac Lab 仿真（UR5e + 夹爪物理仿真）
+### 机械臂 — FK 关节空间
 
 ```bash
-cd ~/work/Universal_Robots/ur5e_gripper/ur5e_gripper_isaaclab
-./run_isaaclab.sh
+# 绝对关节角（单位度）
+ros2 service call /plan_execute ur5e_gripper_msgs/srv/PlanExecute \
+  "{command_type: fk_abs, data: '0 -90 90 0 90 0'}"
 ```
 
-> 需要 Isaac Lab 环境：`conda activate isaaclab`
+```bash
+# 相对关节增量
+ros2 service call /plan_execute ur5e_gripper_msgs/srv/PlanExecute \
+  "{command_type: fk_rel, data: '0 -10 10 0 0 0'}"
+```
 
-### 生成纯 URDF（给 Isaac Sim 导入用）
+### 夹爪
 
 ```bash
-source ~/work/Universal_Robots/install/setup.bash
-xacro ~/work/Universal_Robots/install/ur5e_gripper_description/share/ur5e_gripper_description/urdf/ur5e.urdf.xacro \
-  name:=ur use_gripper:=true safety_limits:=false \
-  | python3 -c "
-import sys, re
-c = sys.stdin.read()
-c = re.sub(r'<ros2_control[^>]*>.*?</ros2_control>', '', c, flags=re.DOTALL)
-c = c.replace('package://ur5e_gripper_description/', '')
-print(c)
-" > urdf/ur5e_with_gripper.urdf
+# 全关  |  半开  |  全开
+ros2 service call /plan_execute ur5e_gripper_msgs/srv/PlanExecute \
+  "{command_type: gripper, data: '0.0'}"
+```
+
+```bash
+ros2 service call /plan_execute ur5e_gripper_msgs/srv/PlanExecute \
+  "{command_type: gripper, data: '0.4'}"
+```
+
+```bash
+ros2 service call /plan_execute ur5e_gripper_msgs/srv/PlanExecute \
+  "{command_type: gripper, data: '0.8'}"
+```
+
+> `data` 范围：0.0（闭合）～ 0.8（全开）
+
+---
+
+## 命令速查
+
+| command_type | data 格式                      | 单位     |
+| ------------ | ------------------------------ | -------- |
+| `ik_rel`   | `dx dy dz droll dpitch dyaw` | 米 / 度  |
+| `ik_abs`   | `x y z roll pitch yaw`       | 米 / 度  |
+| `fk_rel`   | `dj1 dj2 dj3 dj4 dj5 dj6`    | 度       |
+| `fk_abs`   | `j1 j2 j3 j4 j5 j6`          | 度       |
+| `gripper`  | `position`                   | 0.0～0.8 |
+
+---
+
+## GUI 测试面板
+
+```bash
+# 必须用系统 Python 3.10，不能用 conda
+conda deactivate
+source /opt/ros/humble/setup.bash
+source ~/work/ur5e_gripper/install/setup.bash
+python3 ~/work/ur5e_gripper/script/ur5e_gripper_panel.py
+```
+
+---
+
+## 架构
+
+```
+GUI / ros2 service call
+        │
+        ▼
+  planning_node  ───────── action ──────────▶  bridge_node
+  (MoveIt 规划)     FollowJointTrajectory      (协议转换)
+                        GripperCommand              │
+                        ┌───────────────────────────┤
+                        │ topic                     │ topic
+                        ▼                           ▼
+                   control_node  ◀──────────  IsaacLab 仿真
+                   (物理执行)    done signal
 ```
 
 ## 许可

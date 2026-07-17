@@ -5,8 +5,7 @@ set -e
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_DIR="$PROJECT_DIR/install"
 
-ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-40}"
-export ROS_DOMAIN_ID
+export ROS_DOMAIN_ID=0
 
 PIDS=""
 _cleaned=0
@@ -56,7 +55,7 @@ echo "[2/4] 启动 Bridge..."
 setsid bash -c "
     source /opt/ros/humble/setup.bash
     [ -f '$INSTALL_DIR/setup.bash' ] && source '$INSTALL_DIR/setup.bash'
-    python3 '$PROJECT_DIR/ur5e_gripper_isaaclab/src/bridge_node.py'
+    python3 '$PROJECT_DIR/isaaclab/src/bridge_node.py'
 " &
 PIDS="$PIDS $!"
 
@@ -65,7 +64,7 @@ echo "[3/4] 启动 Planning..."
 setsid bash -c "
     source /opt/ros/humble/setup.bash
     [ -f '$INSTALL_DIR/setup.bash' ] && source '$INSTALL_DIR/setup.bash'
-    python3 '$PROJECT_DIR/ur5e_gripper_isaaclab/src/planning_node.py'
+    python3 '$PROJECT_DIR/isaaclab/src/planning_node.py'
 " &
 PIDS="$PIDS $!"
 
@@ -74,7 +73,16 @@ echo "[4/4] 启动 IsaacLab..."
 setsid bash -c "
     source /home/dev/miniconda3/etc/profile.d/conda.sh
     conda activate isaaclab
-    cd '$PROJECT_DIR' && python3 ur5e_gripper_isaaclab/src/run_isaaclab.py
+    cd '$PROJECT_DIR' && python3 isaaclab/src/run_isaaclab.py
+" &
+PIDS="$PIDS $!"
+
+# ---- 调试面板 ----
+echo "[5/5] 启动调试面板..."
+setsid bash -c "
+    source /opt/ros/humble/setup.bash
+    [ -f '$INSTALL_DIR/setup.bash' ] && source '$INSTALL_DIR/setup.bash'
+    python3 '$PROJECT_DIR/script/ur5e_gripper_panel.py'
 " &
 PIDS="$PIDS $!"
 
