@@ -34,6 +34,7 @@ from rclpy.executors import SingleThreadedExecutor
 import omni
 import omni.replicator.core as rep
 import omni.syntheticdata._syntheticdata as sd
+from pxr import Usd, UsdGeom, Gf
 from isaacsim.core.utils import extensions  # type: ignore
 
 import isaaclab.sim as sim_utils
@@ -276,11 +277,7 @@ class MainLoop:
             self.control_node.current_pos = self.ur5e.data.joint_pos[0].cpu().numpy()
             self.control_node.publish_joint_state()
 
-            target = (
-                torch.from_numpy(self.control_node.target_pos)
-                .to(self.sim.device)
-                .unsqueeze(0)
-            )
+            target = torch.from_numpy(self.control_node.target_pos).to(self.sim.device).unsqueeze(0)
             self.ur5e.set_joint_position_target(target)
 
             self.scene.write_data_to_sim()
@@ -296,9 +293,7 @@ class MainLoop:
             torch.from_numpy(p).to(self.sim.device).unsqueeze(0),
             torch.zeros(1, self.ur5e.num_joints, device=self.sim.device),
         )
-        self.ur5e.set_joint_position_target(
-            torch.from_numpy(p).to(self.sim.device).unsqueeze(0)
-        )
+        self.ur5e.set_joint_position_target(torch.from_numpy(p).to(self.sim.device).unsqueeze(0))
         self.control_node.current_pos = p.copy()
         self.control_node.target_pos = p.copy()
 
@@ -310,6 +305,66 @@ class MainLoop:
     # Gemini2 相机 ROS2 发布
     # ==================================================================
 
+    def _print_camera_info(self):
+        """打印相机内参 + 手眼标定信息（numpy 手算，不依赖 Gf 矩阵运算）"""
+        import math
+        import numpy as np
+        from scipy.spatial.transform import Rotation as R
+
+        def _gf_to_pos_quat(mat):
+            """Gf.Matrix4d → (pos_xyz, quat_xyzw) as numpy arrays"""
+            t = mat.ExtractTranslation()
+            q = mat.ExtractRotation().GetQuaternion()
+            return (
+                np.array([t[0], t[1], t[2]]),
+                np.array([q.GetImaginary()[0], q.GetImaginary()[1], q.GetImaginary()[2], q.GetReal()]),
+            )
+
+        def _print_pose(pos, quat_xyzw, label):
+            rpy = R.from_quat(quat_xyzw).as_euler("xyz", degrees=True)
+            print(
+                f"[INFO] {label}: "
+                f"t=({pos[0]:.4f},{pos[1]:.4f},{pos[2]:.4f}) "
+                f"rpy=({rpy[0]:.2f},{rpy[1]:.2f},{rpy[2]:.2f})°"
+            )
+
+        if self.gemini2_cameras:
+            intr = self.gemini2_cameras[0].data.intrinsic_matrices[0].cpu().numpy()
+            res = self.gemini2_cameras[0].data.image_shape
+            print(
+                f"[INFO] Gemini2 intrinsics: fx={intr[0][0]:.1f} fy={intr[1][1]:.1f} "
+                f"cx={intr[0][2]:.1f} cy={intr[1][2]:.1f} res={res[1]}×{res[0]}"
+            )
+        stage = omni.usd.get_context().get_stage()
+        for env_path in sim_utils.find_matching_prim_paths("/World/envs/env_.*"):
+            env = env_path.split("/")[-1]
+            cam_mat = UsdGeom.Xformable(stage.GetPrimAtPath(f"{env_path}/gemini2")).ComputeLocalToWorldTransform(
+                Usd.TimeCode.Default()
+            )
+            base_mat = UsdGeom.Xformable(stage.GetPrimAtPath(f"{env_path}/ur5e")).ComputeLocalToWorldTransform(
+                Usd.TimeCode.Default()
+            )
+
+            cam_pos, cam_quat = _gf_to_pos_quat(cam_mat)
+            base_pos, base_quat = _gf_to_pos_quat(base_mat)
+
+            _print_pose(cam_pos, cam_quat, f"cam_world[{env}]")
+            _print_pose(base_pos, base_quat, f"base_world[{env}]")
+
+            # ---- numpy 手算 camera→base ----
+            R_base = R.from_quat(base_quat)   # scipy 也用 xyzw
+            R_cam = R.from_quat(cam_quat)
+
+            # 平移: 世界下偏移 → 转到基座坐标系
+            diff_world = cam_pos - base_pos
+            t_c2b = R_base.inv().apply(diff_world)
+
+            # 旋转: base_rot⁻¹ * cam_rot
+            R_c2b = R_base.inv() * R_cam
+            q_c2b = R_c2b.as_quat()  # xyzw
+
+            _print_pose(t_c2b, q_c2b, f"camera→base[{env}]")
+
     def _setup_gemini2_cameras(self):
         """用 isaaclab.sensors.Camera + rep.writers 发布 Gemini2 的 4 路流"""
         num_envs = self.scene.num_envs
@@ -320,7 +375,7 @@ class MainLoop:
             (
                 "camera_ir_left/camera_left/Stream_depth",
                 "depth",
-                "gemini2/depth_left",
+                "gemini2/depth",
                 640,
                 400,
             ),
@@ -359,23 +414,16 @@ class MainLoop:
                 self.gemini2_cameras.append(cam)
 
                 # ROS2 publisher
-                sensor_type = (
-                    sd.SensorType.Rgb
-                    if data_type == "rgb"
-                    else sd.SensorType.DistanceToImagePlane
-                )
-                rv = omni.syntheticdata.SyntheticData.convert_sensor_type_to_rendervar(
-                    sensor_type.name
-                )
+                sensor_type = sd.SensorType.Rgb if data_type == "rgb" else sd.SensorType.DistanceToImagePlane
+                rv = omni.syntheticdata.SyntheticData.convert_sensor_type_to_rendervar(sensor_type.name)
                 writer = rep.writers.get(rv + "ROS2PublishImage")
                 topic = f"/env_{env_i}/{topic_base}"
-                writer.initialize(
-                    topicName=topic, frameId=f"gemini2_e{env_i}_{data_type}"
-                )
+                writer.initialize(topicName=topic, frameId=f"gemini2_e{env_i}_{data_type}")
                 writer.attach([cam._render_product_paths[0]])
                 print(f"[INFO] {data_type:5s} → {topic}")
 
         print(f"[INFO] Gemini2 cameras: {num_envs} env × {len(streams)} streams")
+        self._print_camera_info()
 
 
 if __name__ == "__main__":

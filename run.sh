@@ -5,7 +5,7 @@ set -e
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_DIR="$PROJECT_DIR/install"
 
-export ROS_DOMAIN_ID=0
+export ROS_DOMAIN_ID=46
 
 PIDS=""
 _cleaned=0
@@ -41,35 +41,45 @@ echo "  ROS_DOMAIN_ID: $ROS_DOMAIN_ID"
 echo "=============================================="
 
 # ---- MoveIt ----
-echo "[1/4] 启动 MoveIt..."
+echo "[1/6] 启动 MoveIt..."
 setsid bash -c "
     source /opt/ros/humble/setup.bash
     [ -f '$INSTALL_DIR/setup.bash' ] && source '$INSTALL_DIR/setup.bash'
-    ros2 launch ur5e_gripper_moveit_config moveit.launch.py \
+    ros2 launch moveit_config moveit.launch.py \
         use_gripper:=true use_sim_time:=false launch_rviz:=true
 " &
 PIDS="$PIDS $!"
 
 # ---- Bridge ----
-echo "[2/4] 启动 Bridge..."
+echo "[2/6] 启动 Bridge..."
 setsid bash -c "
     source /opt/ros/humble/setup.bash
     [ -f '$INSTALL_DIR/setup.bash' ] && source '$INSTALL_DIR/setup.bash'
-    python3 '$PROJECT_DIR/isaaclab/src/bridge_node.py'
+    ros2 run bridge bridge_node
 " &
 PIDS="$PIDS $!"
 
 # ---- Planning ----
-echo "[3/4] 启动 Planning..."
+echo "[3/6] 启动 Planning..."
 setsid bash -c "
     source /opt/ros/humble/setup.bash
     [ -f '$INSTALL_DIR/setup.bash' ] && source '$INSTALL_DIR/setup.bash'
-    python3 '$PROJECT_DIR/isaaclab/src/planning_node.py'
+    ros2 run bridge planning_node
 " &
 PIDS="$PIDS $!"
 
 # ---- IsaacLab ----
-echo "[4/4] 启动 IsaacLab..."
+# ---- Perception ----
+echo "[4/6] 启动 Perception..."
+setsid bash -c "
+    source /opt/ros/humble/setup.bash
+    [ -f '$INSTALL_DIR/setup.bash' ] && source '$INSTALL_DIR/setup.bash'
+    ros2 run perception perception_node
+" &
+PIDS="$PIDS $!"
+
+# ---- IsaacLab ----
+echo "[5/6] 启动 IsaacLab..."
 setsid bash -c "
     source /home/dev/miniconda3/etc/profile.d/conda.sh
     conda activate isaaclab
@@ -78,11 +88,11 @@ setsid bash -c "
 PIDS="$PIDS $!"
 
 # ---- 调试面板 ----
-echo "[5/5] 启动调试面板..."
+echo "[6/6] 启动调试面板..."
 setsid bash -c "
     source /opt/ros/humble/setup.bash
     [ -f '$INSTALL_DIR/setup.bash' ] && source '$INSTALL_DIR/setup.bash'
-    python3 '$PROJECT_DIR/script/ur5e_gripper_panel.py'
+    python3 '$PROJECT_DIR/script/panel.py'
 " &
 PIDS="$PIDS $!"
 
