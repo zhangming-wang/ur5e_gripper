@@ -27,14 +27,18 @@ simulation_app = app_launcher.app
 # ----------------------------------------------------------------------
 # 3. Imports after App
 # ----------------------------------------------------------------------
+import math
+import random
 import torch
+import numpy as np
+from scipy.spatial.transform import Rotation as R
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
 
 import omni
 import omni.replicator.core as rep
 import omni.syntheticdata._syntheticdata as sd
-from pxr import Usd, UsdGeom, Gf
+from pxr import Usd, UsdGeom, UsdShade, Sdf, Gf, UsdPhysics
 from isaacsim.core.utils import extensions  # type: ignore
 
 import isaaclab.sim as sim_utils
@@ -269,7 +273,7 @@ class MainLoop:
         print("[INFO] Simulation running. Press Ctrl+C to stop.")
 
         while simulation_app.is_running():
-            self.ros_executor.spin_once(timeout_sec=0.0)
+            self.ros_executor.spin_once(timeout_sec=0.001)
 
             self.control_node.step_traj()
             self.control_node.step_gripper()
@@ -301,15 +305,67 @@ class MainLoop:
         self._init_robot()
         print("[INFO]: 仿真环境已重置")
 
+    def spawn_cube(self):
+        """在左托盘生成红色方块，返回对侧托盘的放置位姿"""
+
+        stage = omni.usd.get_context().get_stage()
+        cube_path = "/World/cube_0"
+        cube_size = 0.03  # 3cm
+
+        # 删除旧方块
+        cube_prim = stage.GetPrimAtPath(cube_path)
+        if cube_prim.IsValid():
+            stage.RemovePrim(cube_path)
+
+        # 左托盘表面 (0, 0.5, 0.7)
+        spawn_x, spawn_y, spawn_z = 0.0, 0.5, 0.8
+
+        # 随机绕 Z 轴旋转
+        rand_angle = random.uniform(0, 360)
+        rand_quat = Gf.Rotation(Gf.Vec3d(0.0, 0.0, 1.0), rand_angle)
+
+        # 创建方块
+        cube = UsdGeom.Cube.Define(stage, cube_path)
+        cube.AddTranslateOp().Set(Gf.Vec3d(spawn_x, spawn_y, spawn_z))
+        cube.AddOrientOp().Set(Gf.Quatf(
+            rand_quat.GetQuaternion().GetReal(),
+            *rand_quat.GetQuaternion().GetImaginary(),
+        ))
+        cube.AddScaleOp().Set(Gf.Vec3d(cube_size / 2, cube_size / 2, cube_size / 2))
+
+        # 红色材质
+        mat_path = f"{cube_path}/material"
+        material = UsdShade.Material.Define(stage, mat_path)
+        shader = UsdShade.Shader.Define(stage, f"{mat_path}/shader")
+        shader.CreateIdAttr("UsdPreviewSurface")
+        shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(1.0, 0.0, 0.0))
+        material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+        UsdShade.MaterialBindingAPI(cube.GetPrim()).Bind(material)
+
+        # 物理刚体
+        UsdPhysics.RigidBodyAPI.Apply(cube.GetPrim())
+        UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+
+        print(f"[INFO] Spawned red cube at ({spawn_x:.2f}, {spawn_y:.2f}, {spawn_z:.3f}) angle={rand_angle:.0f}°")
+
+        # 放置到对侧托盘 (右托盘 y=-0.5)
+        return {
+            "success": True,
+            "message": "cube spawned on left tray",
+            "place_x": 0.0,
+            "place_y": -0.5,
+            "place_z": spawn_z + cube_size / 2,  # 方块中心（落在托盘表面后）
+            "place_roll": 180.0,
+            "place_pitch": 0.0,
+            "place_yaw": 90.0,
+        }
+
     # ==================================================================
     # Gemini2 相机 ROS2 发布
     # ==================================================================
 
     def _print_camera_info(self):
         """打印相机内参 + 手眼标定信息（numpy 手算，不依赖 Gf 矩阵运算）"""
-        import math
-        import numpy as np
-        from scipy.spatial.transform import Rotation as R
 
         def _gf_to_pos_quat(mat):
             """Gf.Matrix4d → (pos_xyz, quat_xyzw) as numpy arrays"""

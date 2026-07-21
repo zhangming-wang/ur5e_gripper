@@ -60,6 +60,7 @@ class ControlNode(Node):
 
         # Service
         self.reset_service = self.create_service(Trigger, "/isaac_lab/reset", self.reset_callback)
+        self.spawn_service = self.create_service(Trigger, "/spawn_cube", self._spawn_cube_callback)
 
         # 键盘
         self.appwindow = omni.appwindow.get_default_app_window()
@@ -194,6 +195,21 @@ class ControlNode(Node):
         self.isaaclab.reset_env()
         response.success = True
         response.message = "Reset done"
+        return response
+
+    def _spawn_cube_callback(self, request, response):
+        import json
+        result = self.isaaclab.spawn_cube()
+        response.success = result["success"]
+        # 放置位姿编码为 JSON，跨环境无依赖
+        response.message = json.dumps({
+            "place_x": result.get("place_x", 0.0),
+            "place_y": result.get("place_y", 0.0),
+            "place_z": result.get("place_z", 0.0),
+            "place_roll": result.get("place_roll", 0.0),
+            "place_pitch": result.get("place_pitch", 0.0),
+            "place_yaw": result.get("place_yaw", 0.0),
+        })
         return response
 
     # ------------------------------------------------------------------

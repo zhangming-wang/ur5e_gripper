@@ -1,0 +1,9 @@
+---
+bool success
+string message
+float64 place_x
+float64 place_y
+float64 place_z
+float64 place_roll
+float64 place_pitch
+float64 place_yaw

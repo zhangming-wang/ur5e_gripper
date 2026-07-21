@@ -41,7 +41,7 @@ echo "  ROS_DOMAIN_ID: $ROS_DOMAIN_ID"
 echo "=============================================="
 
 # ---- MoveIt ----
-echo "[1/6] 启动 MoveIt..."
+echo "[1/7] 启动 MoveIt..."
 setsid bash -c "
     source /opt/ros/humble/setup.bash
     [ -f '$INSTALL_DIR/setup.bash' ] && source '$INSTALL_DIR/setup.bash'
@@ -51,7 +51,7 @@ setsid bash -c "
 PIDS="$PIDS $!"
 
 # ---- Bridge ----
-echo "[2/6] 启动 Bridge..."
+echo "[2/7] 启动 Bridge..."
 setsid bash -c "
     source /opt/ros/humble/setup.bash
     [ -f '$INSTALL_DIR/setup.bash' ] && source '$INSTALL_DIR/setup.bash'
@@ -60,7 +60,7 @@ setsid bash -c "
 PIDS="$PIDS $!"
 
 # ---- Planning ----
-echo "[3/6] 启动 Planning..."
+echo "[3/7] 启动 Planning..."
 setsid bash -c "
     source /opt/ros/humble/setup.bash
     [ -f '$INSTALL_DIR/setup.bash' ] && source '$INSTALL_DIR/setup.bash'
@@ -68,9 +68,8 @@ setsid bash -c "
 " &
 PIDS="$PIDS $!"
 
-# ---- IsaacLab ----
 # ---- Perception ----
-echo "[4/6] 启动 Perception..."
+echo "[4/7] 启动 Perception..."
 setsid bash -c "
     source /opt/ros/humble/setup.bash
     [ -f '$INSTALL_DIR/setup.bash' ] && source '$INSTALL_DIR/setup.bash'
@@ -79,7 +78,7 @@ setsid bash -c "
 PIDS="$PIDS $!"
 
 # ---- IsaacLab ----
-echo "[5/6] 启动 IsaacLab..."
+echo "[5/7] 启动 IsaacLab..."
 setsid bash -c "
     source /home/dev/miniconda3/etc/profile.d/conda.sh
     conda activate isaaclab
@@ -87,8 +86,17 @@ setsid bash -c "
 " &
 PIDS="$PIDS $!"
 
+# ---- Orchestrator ----
+echo "[6/7] 启动 Orchestrator..."
+setsid bash -c "
+    source /opt/ros/humble/setup.bash
+    [ -f '$INSTALL_DIR/setup.bash' ] && source '$INSTALL_DIR/setup.bash'
+    ros2 run orchestrator orchestrator_node
+" &
+PIDS="$PIDS $!"
+
 # ---- 调试面板 ----
-echo "[6/6] 启动调试面板..."
+echo "[7/7] 启动调试面板..."
 setsid bash -c "
     source /opt/ros/humble/setup.bash
     [ -f '$INSTALL_DIR/setup.bash' ] && source '$INSTALL_DIR/setup.bash'
