@@ -1,0 +1,10 @@
+# 10-step pick-and-place 流水线
+# Goal: empty trigger
+---
+# Result
+bool success
+string message
+---
+# Feedback: 每步进度
+int32 current_step    # 1-11
+string status         # 当前步骤描述

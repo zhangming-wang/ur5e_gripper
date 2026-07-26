@@ -17,7 +17,7 @@ ARM_TOPIC = "/arm_controller/joint_trajectory"
 GRIPPER_TOPIC = "/gripper_controller/command"
 TRAJ_DONE_TOPIC = "/isaaclab/trajectory_done"
 GRIPPER_DONE_TOPIC = "/isaaclab/gripper_done"
-EXTRA_TIMEOUT = 3.0  # 超时兜底 (秒)
+EXTRA_TIMEOUT = 6.0  # 超时兜底 (秒)
 
 
 class BridgeNode(Node):

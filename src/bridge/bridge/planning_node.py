@@ -126,10 +126,10 @@ class PlanningNode(Node):
                     cur.pose.position.y + pos_raw[1],
                     cur.pose.position.z + pos_raw[2],
                 ]
-                cur_rpy = self._quat_to_rpy(cur.pose.orientation)
-                new_rpy = [cur_rpy[i] + rpy[i] for i in range(3)]
+                delta_quat = self._rpy_to_quat(*rpy)
+                new_quat = self._quat_multiply(delta_quat, self._pose_to_quat(cur.pose))
                 traj = self._arm.plan(
-                    position=new_pos, quat_xyzw=self._rpy_to_quat(*new_rpy), cartesian=True, max_step=0.01
+                    position=new_pos, quat_xyzw=new_quat, cartesian=True, max_step=0.01
                 )
                 return await self._finish_plan(traj, response)
 
@@ -205,6 +205,21 @@ class PlanningNode(Node):
         siny, cosy = 2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)
         yaw = math.atan2(siny, cosy)
         return (roll, pitch, yaw)
+
+    @staticmethod
+    def _pose_to_quat(pose):
+        return (pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w)
+
+    @staticmethod
+    def _quat_multiply(q1, q2):
+        x1, y1, z1, w1 = q1
+        x2, y2, z2, w2 = q2
+        return (
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        )
 
 
 def main():

@@ -185,12 +185,12 @@ class SceneCfg(InteractiveSceneCfg):
                     "wrist_3_joint",
                 ],
                 effort_limit_sim={
-                    "shoulder_pan_joint": 150.0,
-                    "shoulder_lift_joint": 150.0,
-                    "elbow_joint": 150.0,
-                    "wrist_1_joint": 28.0,
-                    "wrist_2_joint": 28.0,
-                    "wrist_3_joint": 28.0,
+                    "shoulder_pan_joint": 300.0,
+                    "shoulder_lift_joint": 300.0,
+                    "elbow_joint": 300.0,
+                    "wrist_1_joint": 300.0,
+                    "wrist_2_joint": 300.0,
+                    "wrist_3_joint": 300.0,
                 },
                 velocity_limit_sim={
                     "shoulder_pan_joint": 3.14,
@@ -213,9 +213,9 @@ class SceneCfg(InteractiveSceneCfg):
                     "robotiq_85_right_finger_tip_joint",
                 ],
                 effort_limit_sim=50.0,
-                velocity_limit_sim=0.5,
-                stiffness=200.0,
-                damping=10.0,
+                velocity_limit_sim=2.0,
+                stiffness=500.0,
+                damping=20.0,
             ),
         },
     )
@@ -256,6 +256,13 @@ class MainLoop:
         self.ur5e = self.scene["ur5e"]
         joint_names = list(self.ur5e.data.joint_names)
         num_joints = self.ur5e.num_joints
+
+        # 隐藏 Gemini2 的 camera_ldm
+        stage = omni.usd.get_context().get_stage()
+        for env_idx in range(args_cli.num_envs):
+            cam_prim = stage.GetPrimAtPath(f"/World/envs/env_{env_idx}/gemini2/Orbbec_Gemini2/camera_ldm")
+            if cam_prim.IsValid():
+                cam_prim.GetAttribute("visibility").Set("invisible")
 
         print(f"\n===== UR5e + Robotiq 2F-85 关节信息 =====")
         for i, name in enumerate(joint_names):
@@ -303,6 +310,11 @@ class MainLoop:
 
     def reset_env(self):
         self._init_robot()
+        # 删除旧方块
+        stage = omni.usd.get_context().get_stage()
+        cube_prim = stage.GetPrimAtPath("/World/cube_0")
+        if cube_prim.IsValid():
+            stage.RemovePrim("/World/cube_0")
         print("[INFO]: 仿真环境已重置")
 
     def spawn_cube(self):
@@ -312,13 +324,11 @@ class MainLoop:
         cube_path = "/World/cube_0"
         cube_size = 0.03  # 3cm
 
-        # 删除旧方块
-        cube_prim = stage.GetPrimAtPath(cube_path)
-        if cube_prim.IsValid():
-            stage.RemovePrim(cube_path)
-
-        # 左托盘表面 (0, 0.5, 0.7)
-        spawn_x, spawn_y, spawn_z = 0.0, 0.5, 0.8
+        # 左托盘表面，矩形区域内随机位置
+        # spawn_x, spawn_y, spawn_z = 0.0, 0.5, 0.8
+        spawn_x = random.uniform(-0.1, 0.1)
+        spawn_y = random.uniform(0.45, 0.55)
+        spawn_z = 0.8
 
         # 随机绕 Z 轴旋转
         rand_angle = random.uniform(0, 360)
@@ -327,10 +337,12 @@ class MainLoop:
         # 创建方块
         cube = UsdGeom.Cube.Define(stage, cube_path)
         cube.AddTranslateOp().Set(Gf.Vec3d(spawn_x, spawn_y, spawn_z))
-        cube.AddOrientOp().Set(Gf.Quatf(
-            rand_quat.GetQuaternion().GetReal(),
-            *rand_quat.GetQuaternion().GetImaginary(),
-        ))
+        cube.AddOrientOp().Set(
+            Gf.Quatf(
+                rand_quat.GetQuaternion().GetReal(),
+                *rand_quat.GetQuaternion().GetImaginary(),
+            )
+        )
         cube.AddScaleOp().Set(Gf.Vec3d(cube_size / 2, cube_size / 2, cube_size / 2))
 
         # 红色材质
@@ -348,16 +360,9 @@ class MainLoop:
 
         print(f"[INFO] Spawned red cube at ({spawn_x:.2f}, {spawn_y:.2f}, {spawn_z:.3f}) angle={rand_angle:.0f}°")
 
-        # 放置到对侧托盘 (右托盘 y=-0.5)
         return {
             "success": True,
-            "message": "cube spawned on left tray",
-            "place_x": 0.0,
-            "place_y": -0.5,
-            "place_z": spawn_z + cube_size / 2,  # 方块中心（落在托盘表面后）
-            "place_roll": 180.0,
-            "place_pitch": 0.0,
-            "place_yaw": 90.0,
+            "message": "cube spawned",
         }
 
     # ==================================================================
@@ -408,7 +413,7 @@ class MainLoop:
             _print_pose(base_pos, base_quat, f"base_world[{env}]")
 
             # ---- numpy 手算 camera→base ----
-            R_base = R.from_quat(base_quat)   # scipy 也用 xyzw
+            R_base = R.from_quat(base_quat)  # scipy 也用 xyzw
             R_cam = R.from_quat(cam_quat)
 
             # 平移: 世界下偏移 → 转到基座坐标系

@@ -29,7 +29,11 @@ class ControlNode(Node):
         self.target_pos = np.zeros(self.num_joints, dtype=np.float64)
         self.init_pos = np.zeros(self.num_joints, dtype=np.float64)
         # 安全默认值（通过关节名设置，不依赖索引）
-        for name, val in [("shoulder_lift_joint", -1.57), ("elbow_joint", 1.57)]:
+        for name, val in [
+            ("shoulder_lift_joint", -1.57),
+            ("elbow_joint", 1.57),
+            ("wrist_2_joint", 1.57),
+        ]:
             if name in self.name_to_idx:
                 self.init_pos[self.name_to_idx[name]] = val
                 self.target_pos[self.name_to_idx[name]] = val
@@ -38,6 +42,10 @@ class ControlNode(Node):
         self._traj_points = []
         self._traj_start_time = 0.0
         self._traj_active = False
+        self._traj_settling = False  # 轨迹时间到，正在等稳定
+        self._traj_settle_start = 0.0
+        self._traj_stable_cnt = 0
+        self._traj_prev_pos = None
         self._last_traj_joint_names = []
 
         # 夹爪
@@ -86,6 +94,7 @@ class ControlNode(Node):
 
     def _arm_traj_callback(self, msg: JointTrajectory):
         self._traj_points = []
+        self._traj_settling = False
         self._last_traj_joint_names = msg.joint_names
         for p in msg.points:
             pos = np.array(self.target_pos)
@@ -99,31 +108,53 @@ class ControlNode(Node):
         self.get_logger().info(f"Trajectory: {len(msg.points)} pts, " f"duration={self._traj_points[-1][1]:.1f}s")
 
     def step_traj(self):
-        """每物理帧调用，线性插值当前目标位置"""
-        if not self._traj_active or not self._traj_points:
+        """每物理帧调用，线性插值当前目标位置，结束后等稳定"""
+        if not self._traj_active:
             return
 
-        elapsed = time.time() - self._traj_start_time
-        prev_pos, prev_t = self._traj_points[0]
+        if not self._traj_settling:
+            elapsed = time.time() - self._traj_start_time
+            prev_pos, prev_t = self._traj_points[0]
 
-        if elapsed <= prev_t:
-            self._apply_arm_positions(prev_pos)
-            return
-
-        for i in range(1, len(self._traj_points)):
-            cur_pos, cur_t = self._traj_points[i]
-            if elapsed <= cur_t:
-                alpha = (elapsed - prev_t) / (cur_t - prev_t)
-                self._apply_arm_positions(prev_pos + (cur_pos - prev_pos) * alpha)
+            if elapsed <= prev_t:
+                self._apply_arm_positions(prev_pos)
                 return
-            prev_pos, prev_t = cur_pos, cur_t
 
-        # 只更新臂关节，保留 step_gripper 可能设的夹爪目标
-        self._apply_arm_positions(self._traj_points[-1][0])
+            for i in range(1, len(self._traj_points)):
+                cur_pos, cur_t = self._traj_points[i]
+                if elapsed <= cur_t:
+                    alpha = (elapsed - prev_t) / (cur_t - prev_t)
+                    self._apply_arm_positions(prev_pos + (cur_pos - prev_pos) * alpha)
+                    return
+                prev_pos, prev_t = cur_pos, cur_t
+
+            self._apply_arm_positions(self._traj_points[-1][0])
+            self._traj_points.clear()
+            self._traj_settling = True
+            self._traj_settle_start = time.time()
+            self._traj_stable_cnt = 0
+            self._traj_prev_pos = None
+            return
+
+        # 稳定检测：连续3帧位置不变 或 超时3秒
+        if time.time() - self._traj_settle_start > 5.0:
+            self.get_logger().warn("Arm settle timeout, force done")
+            self._finish_traj()
+            return
+
+        cur = self.current_pos[self.name_to_idx[self._last_traj_joint_names[0]]]
+        if self._traj_prev_pos is not None and abs(cur - self._traj_prev_pos) < 1e-4:
+            self._traj_stable_cnt += 1
+            if self._traj_stable_cnt >= 3:
+                self._finish_traj()
+                return
+        else:
+            self._traj_stable_cnt = 0
+        self._traj_prev_pos = cur
+
+    def _finish_traj(self):
         self._traj_active = False
-        self._traj_points.clear()
-
-        # 打印最终误差
+        self._traj_settling = False
         errs = []
         for name in self._last_traj_joint_names:
             if name in self.name_to_idx:
@@ -131,7 +162,6 @@ class ControlNode(Node):
                 e = abs(self.current_pos[i] - self.target_pos[i])
                 errs.append(f"{name}={e:.4f}")
         self.get_logger().info(f"Trajectory done. Errors: {', '.join(errs)}")
-
         self._traj_done_pub.publish(Bool(data=True))
 
     def _apply_arm_positions(self, src):
@@ -191,6 +221,7 @@ class ControlNode(Node):
 
     def reset_callback(self, request, response):
         self._traj_active = False
+        self._traj_settling = False
         self._traj_points.clear()
         self.isaaclab.reset_env()
         response.success = True
@@ -198,18 +229,9 @@ class ControlNode(Node):
         return response
 
     def _spawn_cube_callback(self, request, response):
-        import json
         result = self.isaaclab.spawn_cube()
         response.success = result["success"]
-        # 放置位姿编码为 JSON，跨环境无依赖
-        response.message = json.dumps({
-            "place_x": result.get("place_x", 0.0),
-            "place_y": result.get("place_y", 0.0),
-            "place_z": result.get("place_z", 0.0),
-            "place_roll": result.get("place_roll", 0.0),
-            "place_pitch": result.get("place_pitch", 0.0),
-            "place_yaw": result.get("place_yaw", 0.0),
-        })
+        response.message = result["message"]
         return response
 
     # ------------------------------------------------------------------
