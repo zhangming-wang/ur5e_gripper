@@ -1,0 +1,57 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="mujoco_ros2_control" params="mujoco_model_path headless">
+    <ros2_control name="MujocoSystem" type="system">
+      <hardware>
+        <plugin>mujoco_ros2_control/MujocoSystemInterface</plugin>
+        <param name="mujoco_model">${mujoco_model_path}</param>
+        <param name="headless">${headless}</param>
+      </hardware>
+
+      <joint name="shoulder_pan_joint">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+        <state_interface name="effort"/>
+      </joint>
+      <joint name="shoulder_lift_joint">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">-1.57</param></state_interface>
+        <state_interface name="velocity"/>
+        <state_interface name="effort"/>
+      </joint>
+      <joint name="elbow_joint">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+        <state_interface name="effort"/>
+      </joint>
+      <joint name="wrist_1_joint">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">-1.57</param></state_interface>
+        <state_interface name="velocity"/>
+        <state_interface name="effort"/>
+      </joint>
+      <joint name="wrist_2_joint">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+        <state_interface name="effort"/>
+      </joint>
+      <joint name="wrist_3_joint">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+        <state_interface name="effort"/>
+      </joint>
+
+      <joint name="robotiq_85_left_knuckle_joint">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+        <state_interface name="effort"/>
+      </joint>
+    </ros2_control>
+  </xacro:macro>
+</robot>

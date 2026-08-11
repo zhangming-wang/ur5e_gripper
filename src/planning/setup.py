@@ -1,7 +1,7 @@
 import os
 from setuptools import setup
 
-package_name = "bridge"
+package_name = "planning"
 
 setup(
     name=package_name,
@@ -15,8 +15,7 @@ setup(
     zip_safe=True,
     entry_points={
         "console_scripts": [
-            "bridge_node = bridge.bridge_node:main",
-            "planning_node = bridge.planning_node:main",
+            "planning_node = planning.planning_node:main",
         ],
     },
 )

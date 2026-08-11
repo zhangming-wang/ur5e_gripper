@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>bridge</name>
+  <name>planning</name>
   <version>1.0.0</version>
-  <description>MoveIt ↔ IsaacLab bridge and planning nodes</description>
+  <description>MoveIt planning node (IK/FK/gripper)</description>
   <maintainer email="user@example.com">user</maintainer>
   <license>Apache-2.0</license>
   <exec_depend>rclpy</exec_depend>
