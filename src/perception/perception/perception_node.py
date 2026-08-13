@@ -14,42 +14,90 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image
 from custom_msgs.srv import DetectObject
 
-# Gemini2 相机内参 (从 IsaacLab 仿真传感器读取)
-FX, FY = 686.3, 686.3
-CX, CY = 640.0, 360.0
-
-# 手眼标定: camera→base 变换 (从 IsaacLab USD Stage 地面真值计算)
-# cam_world:  t=(0, 0.5, 1.5)  rpy=(180°,0,0)
-# base_world: t=(0, 0,   0.7)  rpy=(0,0,0)
-# → camera→base: t=(0, 0.5, 0.8)  rpy=(180°,0,0)
-CAM_TO_BASE_T = np.array([0.0, 0.5, 0.8])
-# 180° 绕 X 轴的旋转矩阵 + x/y 镜像矫正
-CAM_TO_BASE_R = np.array([[-1.0, 0.0, 0.0],
-                           [0.0, 1.0, 0.0],
-                           [0.0, 0.0, -1.0]])
-
 
 class PerceptionNode(Node):
     def __init__(self):
         super().__init__("perception_node")
 
-        # 环境前缀参数，默认 "env_0"，支持 launch 传参
         self.declare_parameter("env_prefix", "env_0")
-        self._env = self.get_parameter("env_prefix").get_parameter_value().string_value
+        self.declare_parameter("rgb_topic", "/{env_prefix}/gemini2/rgb")
+        self.declare_parameter("depth_topic", "/{env_prefix}/gemini2/depth")
+        self.declare_parameter("detected_image_topic", "/detected_image")
+        self.declare_parameter("fx", 686.3)
+        self.declare_parameter("fy", 686.3)
+        self.declare_parameter("cx", 640.0)
+        self.declare_parameter("cy", 360.0)
+        self.declare_parameter("camera_to_base_translation", [0.0, 0.5, 0.8])
+        self.declare_parameter(
+            "camera_to_base_rotation",
+            [-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0],
+        )
+        self.declare_parameter("roi_top", 1.0 / 3.0)
+        self.declare_parameter("roi_bottom", 2.0 / 3.0)
+        self.declare_parameter("hsv_lower_1", [0, 100, 50])
+        self.declare_parameter("hsv_upper_1", [10, 255, 255])
+        self.declare_parameter("hsv_lower_2", [170, 100, 50])
+        self.declare_parameter("hsv_upper_2", [180, 255, 255])
+        self.declare_parameter("min_contour_area", 200.0)
+        self.declare_parameter("default_depth", 1.0)
 
-        # 检测区域参数 (占图像高度的比例，范围 0.0~1.0)
-        self._roi_top = 1.0 / 3.0
-        self._roi_bottom = 2.0 / 3.0
+        self._env = str(self.get_parameter("env_prefix").value)
+        self._fx = float(self.get_parameter("fx").value)
+        self._fy = float(self.get_parameter("fy").value)
+        self._cx = float(self.get_parameter("cx").value)
+        self._cy = float(self.get_parameter("cy").value)
+        self._roi_top = float(self.get_parameter("roi_top").value)
+        self._roi_bottom = float(self.get_parameter("roi_bottom").value)
+        self._min_contour_area = float(self.get_parameter("min_contour_area").value)
+        self._default_depth = float(self.get_parameter("default_depth").value)
+
+        translation = np.asarray(self.get_parameter("camera_to_base_translation").value, dtype=float).reshape(-1)
+        rotation = np.asarray(self.get_parameter("camera_to_base_rotation").value, dtype=float).reshape(-1)
+        if translation.size != 3:
+            raise ValueError("camera_to_base_translation must contain 3 values")
+        if rotation.size != 9:
+            raise ValueError("camera_to_base_rotation must contain 9 values")
+        self._cam_to_base_t = translation
+        self._cam_to_base_r = rotation.reshape(3, 3)
+
+        if self._fx <= 0 or self._fy <= 0:
+            raise ValueError("fx and fy must be positive")
+        if not 0.0 <= self._roi_top < self._roi_bottom <= 1.0:
+            raise ValueError("roi_top and roi_bottom must satisfy 0 <= top < bottom <= 1")
+        if self._min_contour_area < 0 or self._default_depth <= 0:
+            raise ValueError("min_contour_area must be non-negative and default_depth positive")
+
+        def hsv_parameter(name):
+            values = np.asarray(self.get_parameter(name).value, dtype=float).reshape(-1)
+            limits = np.array([180, 255, 255], dtype=float)
+            if values.size != 3 or np.any(values < 0) or np.any(values > limits):
+                raise ValueError(f"{name} must contain H/S/V values within 0..180/255/255")
+            return tuple(int(value) for value in values)
+
+        self._hsv_lower_1 = hsv_parameter("hsv_lower_1")
+        self._hsv_upper_1 = hsv_parameter("hsv_upper_1")
+        self._hsv_lower_2 = hsv_parameter("hsv_lower_2")
+        self._hsv_upper_2 = hsv_parameter("hsv_upper_2")
+        for lower, upper in (
+            (self._hsv_lower_1, self._hsv_upper_1),
+            (self._hsv_lower_2, self._hsv_upper_2),
+        ):
+            if any(low > high for low, high in zip(lower, upper)) or upper[0] > 180:
+                raise ValueError("HSV lower/upper thresholds are invalid")
+
+        rgb_topic = self._resolve_topic(str(self.get_parameter("rgb_topic").value))
+        depth_topic = self._resolve_topic(str(self.get_parameter("depth_topic").value))
+        detected_image_topic = str(self.get_parameter("detected_image_topic").value)
 
         self._bridge = CvBridge()
         self._latest_rgb = None   # (stamp, cv_image)
         self._latest_depth = None  # (stamp, cv_image)
 
         # 缓存最新帧
-        self.create_subscription(Image, f"/{self._env}/gemini2/rgb", self._rgb_callback, 10)
-        self.create_subscription(Image, f"/{self._env}/gemini2/depth", self._depth_callback, 10)
+        self.create_subscription(Image, rgb_topic, self._rgb_callback, 10)
+        self.create_subscription(Image, depth_topic, self._depth_callback, 10)
 
-        self._detected_pub = self.create_publisher(Image, "/detected_image", 10)
+        self._detected_pub = self.create_publisher(Image, detected_image_topic, 10)
         self._detect_service = self.create_service(DetectObject, "/detect_object", self._detect_callback)
 
         # OpenCV 显示线程 — 分别存原图和检测结果，线程独立组合
@@ -60,6 +108,9 @@ class PerceptionNode(Node):
         self._display_thread.start()
 
         self.get_logger().info(f"Perception node ready (env_prefix={self._env})")
+
+    def _resolve_topic(self, topic):
+        return topic.replace("{env_prefix}", self._env)
 
     def _rgb_callback(self, msg: Image):
         try:
@@ -150,8 +201,8 @@ class PerceptionNode(Node):
         hsv = cv2.cvtColor(rgb, cv2.COLOR_BGR2HSV)
 
         # 检测红色物体
-        mask1 = cv2.inRange(hsv, (0, 100, 50), (10, 255, 255))
-        mask2 = cv2.inRange(hsv, (170, 100, 50), (180, 255, 255))
+        mask1 = cv2.inRange(hsv, self._hsv_lower_1, self._hsv_upper_1)
+        mask2 = cv2.inRange(hsv, self._hsv_lower_2, self._hsv_upper_2)
         mask = mask1 | mask2
 
         # 只检测 ROI 区域 (按 self._roi_top / self._roi_bottom 裁剪)
@@ -164,7 +215,7 @@ class PerceptionNode(Node):
             return {"detected": False}
 
         c = max(contours, key=cv2.contourArea)
-        if cv2.contourArea(c) < 200:
+        if cv2.contourArea(c) < self._min_contour_area:
             return {"detected": False}
 
         M = cv2.moments(c)
@@ -189,16 +240,19 @@ class PerceptionNode(Node):
             # 缩放中心点到深度分辨率
             dcx = int(cx * dw / w_rgb)
             dcy = int(cy * dh / h_rgb)
-            z = float(depth[dcy, dcx]) if 0 <= dcx < dw and 0 <= dcy < dh else 1.0
+            z = float(depth[dcy, dcx]) if 0 <= dcx < dw and 0 <= dcy < dh else self._default_depth
         else:
-            z = 1.0
+            z = self._default_depth
 
-        x_cam = (cx - CX) / FX * z
-        y_cam = (cy - CY) / FY * z
+        if not np.isfinite(z) or z <= 0:
+            z = self._default_depth
+
+        x_cam = (cx - self._cx) / self._fx * z
+        y_cam = (cy - self._cy) / self._fy * z
 
         # 相机坐标系 → 机器人基座坐标系 (手眼标定)
         p_cam = np.array([x_cam, y_cam, z])
-        p_base = CAM_TO_BASE_R @ p_cam + CAM_TO_BASE_T
+        p_base = self._cam_to_base_r @ p_cam + self._cam_to_base_t
 
         self.get_logger().info(
             f"Detected: center=({cx},{cy}) z={z:.3f}m "
@@ -214,15 +268,14 @@ class PerceptionNode(Node):
             "yaw": yaw_rad,
             "cx": cx, "cy": cy, "contour": c, "box": box.astype(np.int32),
         }
-    @staticmethod
-    def _base_to_pixel(bx, by, bz, rgb_shape):
-        x_cam = -bx
-        y_cam = by - 0.5
-        z_cam = 0.8 - bz
+    def _base_to_pixel(self, bx, by, bz, rgb_shape):
+        p_base = np.array([bx, by, bz], dtype=float)
+        p_cam = self._cam_to_base_r.T @ (p_base - self._cam_to_base_t)
+        x_cam, y_cam, z_cam = p_cam
         if abs(z_cam) < 1e-6:
             return (-1, -1)
-        px = int(x_cam / z_cam * FX + CX)
-        py = int(y_cam / z_cam * FY + CY)
+        px = int(x_cam / z_cam * self._fx + self._cx)
+        py = int(y_cam / z_cam * self._fy + self._cy)
         return (min(max(px, 0), rgb_shape[1] - 1), min(max(py, 0), rgb_shape[0] - 1))
 
 

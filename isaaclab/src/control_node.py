@@ -53,6 +53,7 @@ class ControlNode(Node):
         self._gripper_done_sent = True
         self._gripper_stable_cnt = 0
         self._gripper_prev_pos = None
+        self._motion_stopped = False
 
         qos = rclpy.qos.QoSProfile(depth=10, reliability=rclpy.qos.ReliabilityPolicy.RELIABLE)
 
@@ -65,6 +66,7 @@ class ControlNode(Node):
         # Sub: 桥接节点发的指令
         self.create_subscription(JointTrajectory, "/arm_controller/joint_trajectory", self._arm_traj_callback, qos)
         self.create_subscription(Float64, "/gripper_controller/command", self._gripper_callback, qos)
+        self.create_subscription(Bool, "/isaaclab/stop_motion", self._stop_motion_callback, qos)
 
         # Service
         self.reset_service = self.create_service(Trigger, "/isaac_lab/reset", self.reset_callback)
@@ -94,6 +96,10 @@ class ControlNode(Node):
 
     def _arm_traj_callback(self, msg: JointTrajectory):
         self._traj_points = []
+        self._motion_stopped = False
+        if not msg.points:
+            self._traj_active = False
+            return
         self._traj_settling = False
         self._last_traj_joint_names = msg.joint_names
         for p in msg.points:
@@ -109,6 +115,8 @@ class ControlNode(Node):
 
     def step_traj(self):
         """每物理帧调用，线性插值当前目标位置，结束后等稳定"""
+        if self._motion_stopped:
+            return
         if not self._traj_active:
             return
 
@@ -175,6 +183,10 @@ class ControlNode(Node):
 
     def step_gripper(self):
         """每物理帧调用，设夹爪目标 + 不动了发完成信号"""
+        if self._motion_stopped:
+            return
+        if self._gripper_done_sent:
+            return
         all_gripper = [
             "robotiq_85_left_knuckle_joint",
             "robotiq_85_right_knuckle_joint",
@@ -192,8 +204,6 @@ class ControlNode(Node):
                     v = -self._gripper_target if "right" in jname else self._gripper_target
                 self.target_pos[self.name_to_idx[jname]] = v
 
-        if self._gripper_done_sent:
-            return
         J = "robotiq_85_left_knuckle_joint"
         idx = self.name_to_idx.get(J)
         if idx is None:
@@ -210,16 +220,36 @@ class ControlNode(Node):
         self._gripper_prev_pos = cur
 
     def _gripper_callback(self, msg: Float64):
+        self._motion_stopped = False
         self._gripper_target = msg.data
         self._gripper_done_sent = False
         self._gripper_stable_cnt = 0
         self._gripper_prev_pos = None
+
+    def _stop_motion_callback(self, msg: Bool):
+        if not msg.data:
+            return
+        self._motion_stopped = True
+        self._traj_points.clear()
+        self._traj_active = False
+        self._traj_settling = False
+        self._traj_prev_pos = None
+        self._last_traj_joint_names = []
+        self.target_pos = self.current_pos.copy()
+        self._gripper_done_sent = True
+        self._gripper_stable_cnt = 0
+        self._gripper_prev_pos = None
+        self._gripper_target = float(
+            self.current_pos[self.name_to_idx["robotiq_85_left_knuckle_joint"]]
+        ) if "robotiq_85_left_knuckle_joint" in self.name_to_idx else 0.0
+        self.get_logger().warn("Motion stopped")
 
     # ------------------------------------------------------------------
     # 重置
     # ------------------------------------------------------------------
 
     def reset_callback(self, request, response):
+        self._motion_stopped = False
         self._traj_active = False
         self._traj_settling = False
         self._traj_points.clear()
@@ -241,6 +271,7 @@ class ControlNode(Node):
     def on_keyboard_event(self, event, *_):
         if event.type == carb.input.KeyboardEventType.KEY_PRESS:
             if event.input == carb.input.KeyboardInput.R:
+                self._motion_stopped = False
                 self._traj_active = False
                 self._traj_points.clear()
                 self.isaaclab.reset_env()

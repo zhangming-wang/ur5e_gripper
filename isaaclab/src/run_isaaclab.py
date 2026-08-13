@@ -280,12 +280,12 @@ class MainLoop:
         print("[INFO] Simulation running. Press Ctrl+C to stop.")
 
         while simulation_app.is_running():
+            self.control_node.current_pos = self.ur5e.data.joint_pos[0].cpu().numpy()
             self.ros_executor.spin_once(timeout_sec=0.001)
 
             self.control_node.step_traj()
             self.control_node.step_gripper()
 
-            self.control_node.current_pos = self.ur5e.data.joint_pos[0].cpu().numpy()
             self.control_node.publish_joint_state()
 
             target = torch.from_numpy(self.control_node.target_pos).to(self.sim.device).unsqueeze(0)

@@ -12,6 +12,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.executors import MultiThreadedExecutor
+from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
 from custom_msgs.srv import DetectObject, PlanExecute
 from custom_msgs.action import PickAndPlace
@@ -40,6 +41,9 @@ class OrchestratorNode(Node):
 
         # 标志位：是否取消当前任务
         self._cancel_requested = False
+        self._goal_active = False
+        self._goal_lock = threading.Lock()
+        self._stop_motion_pub = self.create_publisher(Bool, "/isaaclab/stop_motion", 10)
 
         # Action Server
         self._action_server = ActionServer(
@@ -58,18 +62,25 @@ class OrchestratorNode(Node):
     # ==================================================================
 
     def _goal_callback(self, goal_request):
+        with self._goal_lock:
+            if self._goal_active:
+                self.get_logger().warn("Rejecting concurrent PickAndPlace goal")
+                return GoalResponse.REJECT
+            self._goal_active = True
+            self._cancel_requested = False
         self.get_logger().info("PickAndPlace goal received, accepting")
         return GoalResponse.ACCEPT
 
     def _cancel_callback(self, goal_handle):
         self.get_logger().warn("PickAndPlace cancel requested")
         self._cancel_requested = True
+        self._stop_motion_pub.publish(Bool(data=True))
         return CancelResponse.ACCEPT
 
     def _execute_callback(self, goal_handle):
-        self._cancel_requested = False
         result = PickAndPlace.Result()
         cycle = 0
+        succeeded = False
 
         while not self._cancel_requested:
             cycle += 1
@@ -169,17 +180,32 @@ class OrchestratorNode(Node):
                 self._assert_not_cancelled()
 
                 self.get_logger().info(f"✅ Cycle {cycle} complete\n")
+                succeeded = True
+                break
 
             except Exception as e:
                 if "Cancelled" in str(e):
                     break
                 self.get_logger().error(f"Cycle {cycle} failed: {e}")
-                self._sleep(1.0)
+                break
 
-        self.get_logger().info("Pick-and-place loop stopped")
-        goal_handle.abort()
-        result.success = False
-        result.message = "Stopped"
+        with self._goal_lock:
+            self._goal_active = False
+        if self._cancel_requested or goal_handle.is_cancel_requested:
+            self.get_logger().info("Pick-and-place canceled")
+            goal_handle.canceled()
+            result.success = False
+            result.message = "Canceled"
+        elif succeeded:
+            self.get_logger().info("Pick-and-place completed")
+            goal_handle.succeed()
+            result.success = True
+            result.message = "Pick-and-place completed"
+        else:
+            self.get_logger().error("Pick-and-place failed")
+            goal_handle.abort()
+            result.success = False
+            result.message = "Pick-and-place failed"
         return result
 
     # ==================================================================
@@ -257,7 +283,7 @@ class OrchestratorNode(Node):
         feedback.current_step = step
         feedback.status = status
         goal_handle.publish_feedback(feedback)
-        self.get_logger().info(f"[{step}/10] {status}")
+        self.get_logger().info(f"[{step}/11] {status}")
 
 
 def main():

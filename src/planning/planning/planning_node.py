@@ -10,6 +10,7 @@ import math
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from action_msgs.msg import GoalStatus
 from rclpy.callback_groups import ReentrantCallbackGroup
 from sensor_msgs.msg import JointState
 from custom_msgs.srv import PlanExecute
@@ -159,10 +160,11 @@ class PlanningNode(Node):
             response.message = "Gripper bridge not reachable"
             return response
         gh = await self._gripper_client.send_goal_async(goal)
-        if gh.accepted:
-            await gh.get_result_async()
-            response.success = True
-            response.message = "done"
+        if gh is not None and gh.accepted:
+            action_result = await gh.get_result_async()
+            command_result = action_result.result
+            response.success = action_result.status == GoalStatus.STATUS_SUCCEEDED and command_result.reached_goal
+            response.message = "done" if response.success else "gripper execution failed"
         else:
             response.success = False
             response.message = "rejected"
@@ -178,9 +180,10 @@ class PlanningNode(Node):
         if not self._traj_client.wait_for_server(timeout_sec=1.0):
             return False
         gh = await self._traj_client.send_goal_async(goal)
-        if gh.accepted:
-            await gh.get_result_async()
-            return True
+        if gh is not None and gh.accepted:
+            action_result = await gh.get_result_async()
+            command_result = action_result.result
+            return action_result.status == GoalStatus.STATUS_SUCCEEDED and command_result.error_code == FollowJointTrajectory.Result.SUCCESSFUL
         return False
 
     @staticmethod

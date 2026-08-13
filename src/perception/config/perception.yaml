@@ -1,0 +1,22 @@
+perception_node:
+  ros__parameters:
+    env_prefix: "env_0"
+    rgb_topic: "/{env_prefix}/gemini2/rgb"
+    depth_topic: "/{env_prefix}/gemini2/depth"
+    detected_image_topic: "/detected_image"
+
+    fx: 686.3
+    fy: 686.3
+    cx: 640.0
+    cy: 360.0
+    camera_to_base_translation: [0.0, 0.5, 0.8]
+    camera_to_base_rotation: [-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0]
+
+    roi_top: 0.3333333333
+    roi_bottom: 0.6666666667
+    hsv_lower_1: [0, 100, 50]
+    hsv_upper_1: [10, 255, 255]
+    hsv_lower_2: [170, 100, 50]
+    hsv_upper_2: [180, 255, 255]
+    min_contour_area: 200.0
+    default_depth: 1.0
