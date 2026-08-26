@@ -1,0 +1,8 @@
+<library path="mujoco_scene_plugin">
+  <class
+    name="mujoco_scene_plugin/MuJoCoScenePlugin"
+    type="mujoco_scene_plugin::MuJoCoScenePlugin"
+    base_class_type="mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase">
+    <description>Spawn and reset the pick-and-place cube in MuJoCo.</description>
+  </class>
+</library>

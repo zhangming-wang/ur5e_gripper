@@ -5,6 +5,7 @@
   <description>调度节点 — 串行编排 pick-and-place 全流程</description>
   <maintainer email="user@example.com">user</maintainer>
   <license>Apache-2.0</license>
+  <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>std_srvs</exec_depend>

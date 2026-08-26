@@ -1,0 +1,5 @@
+/**:
+  ros__parameters:
+    mujoco_plugins:
+      scene_plugin:
+        type: "mujoco_scene_plugin/MuJoCoScenePlugin"

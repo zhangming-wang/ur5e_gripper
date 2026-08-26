@@ -18,8 +18,8 @@ XML_DIR = os.path.join(os.path.dirname(__file__), "..", "xml")
 UR5E_SCENE = os.path.join(XML_DIR, "universal_robots_ur5e", "scene.xml")
 GRIPPER_XML = os.path.join(XML_DIR, "robotiq_2f85", "2f85.xml")
 
-GRIPPER_OPEN = 90.0
-GRIPPER_CLOSE = 30.0
+GRIPPER_OPEN = 0.0
+GRIPPER_CLOSE = 255.0
 
 
 def build_model():

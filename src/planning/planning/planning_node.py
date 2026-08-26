@@ -7,12 +7,14 @@ ros2 service call /plan_execute custom_msgs/srv/PlanExecute \
 """
 
 import math
+import threading
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from action_msgs.msg import GoalStatus
 from rclpy.callback_groups import ReentrantCallbackGroup
 from sensor_msgs.msg import JointState
+from std_msgs.msg import Bool
 from custom_msgs.srv import PlanExecute
 from control_msgs.action import FollowJointTrajectory, GripperCommand
 from pymoveit2 import MoveIt2
@@ -28,6 +30,8 @@ ARM_JOINTS = [
 
 
 class PlanningNode(Node):
+    CARTESIAN_FRACTION_THRESHOLD = 0.99
+
     def __init__(self):
         super().__init__("planning_node")
 
@@ -38,14 +42,19 @@ class PlanningNode(Node):
             end_effector_name="tool0",
             group_name="ur_manipulator",
         )
+        self._arm.cartesian_avoid_collisions = True
 
         self._traj_client = ActionClient(
             self, FollowJointTrajectory, "/joint_trajectory_controller/follow_joint_trajectory"
         )
         self._gripper_client = ActionClient(self, GripperCommand, "/robotiq_gripper_controller/gripper_cmd")
 
-        self._current_joints = [0.0] * 6
-        self.create_subscription(JointState, "/joint_states", self._js_cb, 10)
+        self._command_lock = threading.Lock()
+        self._active_goal_lock = threading.Lock()
+        self._active_arm_goal = None
+        self._active_gripper_goal = None
+        self._stop_requested = threading.Event()
+        self.create_subscription(Bool, "/stop_motion", self._stop_motion_cb, 10)
 
         self._srv = self.create_service(
             PlanExecute, "/plan_execute", self._callback, callback_group=ReentrantCallbackGroup()
@@ -56,15 +65,28 @@ class PlanningNode(Node):
     # 回调
     # ------------------------------------------------------------------
 
-    def _js_cb(self, msg: JointState):
-        for name, pos in zip(msg.name, msg.position):
-            try:
-                i = ARM_JOINTS.index(name)
-                self._current_joints[i] = pos
-            except ValueError:
-                pass
+    def _joint_state_snapshot(self):
+        """Return one consistently ordered arm state from MoveIt's latest sample."""
+        source = self._arm.joint_state
+        if source is None:
+            return None
+
+        positions = dict(zip(source.name, source.position))
+        if any(name not in positions or not math.isfinite(positions[name]) for name in ARM_JOINTS):
+            return None
+
+        snapshot = JointState()
+        snapshot.header = source.header
+        snapshot.name = list(ARM_JOINTS)
+        snapshot.position = [positions[name] for name in ARM_JOINTS]
+        return snapshot
 
     async def _callback(self, request, response):
+        if not self._command_lock.acquire(blocking=False):
+            response.success = False
+            response.message = "Another planning command is already executing"
+            return response
+
         self.get_logger().info(f"Received: {request.command_type} '{request.data}'")
         try:
             cmd = request.command_type
@@ -78,6 +100,8 @@ class PlanningNode(Node):
         except Exception as e:
             response.success = False
             response.message = str(e)
+        finally:
+            self._command_lock.release()
         return response
 
     # ------------------------------------------------------------------
@@ -95,15 +119,35 @@ class PlanningNode(Node):
             response.message = f"Need 6 values, got {len(raw)}"
             return response
 
+        state = self._joint_state_snapshot()
+        if state is None:
+            response.success = False
+            response.message = "Joint state is unavailable or incomplete"
+            return response
+        current = list(state.position)
+        self._stop_requested.clear()
+
         if cmd in ("fk_abs", "fk_rel"):
             # all 6 are joint angles in degrees → radians
             parts = [math.radians(v) for v in raw]
             if cmd == "fk_abs":
-                traj = self._arm.plan(joint_positions=parts)
+                traj = self._arm.plan(joint_positions=parts, start_joint_state=state)
                 return await self._finish_plan(traj, response)
             else:  # fk_rel
-                target = [c + d for c, d in zip(self._current_joints, parts)]
-                traj = self._arm.plan(joint_positions=target)
+                target = [c + d for c, d in zip(current, parts)]
+                fixed_names = [
+                    name for name, delta in zip(ARM_JOINTS, parts) if abs(delta) < 1e-9
+                ]
+                fixed_positions = [
+                    value for value, delta in zip(current, parts) if abs(delta) < 1e-9
+                ]
+                if fixed_names:
+                    self._arm.set_path_joint_constraint(
+                        joint_positions=fixed_positions,
+                        joint_names=fixed_names,
+                        tolerance=1e-4,
+                    )
+                traj = self._arm.plan(joint_positions=target, start_joint_state=state)
                 return await self._finish_plan(traj, response)
 
         elif cmd in ("ik_abs", "ik_rel"):
@@ -112,11 +156,16 @@ class PlanningNode(Node):
             rpy = [math.radians(v) for v in raw[3:]]
             if cmd == "ik_abs":
                 traj = self._arm.plan(
-                    position=pos_raw, quat_xyzw=self._rpy_to_quat(*rpy), cartesian=True, max_step=0.01
+                    position=pos_raw,
+                    quat_xyzw=self._rpy_to_quat(*rpy),
+                    start_joint_state=state,
+                    cartesian=True,
+                    max_step=0.01,
+                    cartesian_fraction_threshold=self.CARTESIAN_FRACTION_THRESHOLD,
                 )
                 return await self._finish_plan(traj, response)
             else:  # ik_rel
-                fk = self._arm.compute_fk(self._current_joints, fk_link_names=["tool0"])
+                fk = self._arm.compute_fk(state, fk_link_names=["tool0"])
                 if fk is None or not fk:
                     response.success = False
                     response.message = "FK failed"
@@ -130,14 +179,19 @@ class PlanningNode(Node):
                 delta_quat = self._rpy_to_quat(*rpy)
                 new_quat = self._quat_multiply(delta_quat, self._pose_to_quat(cur.pose))
                 traj = self._arm.plan(
-                    position=new_pos, quat_xyzw=new_quat, cartesian=True, max_step=0.01
+                    position=new_pos,
+                    quat_xyzw=new_quat,
+                    start_joint_state=state,
+                    cartesian=True,
+                    max_step=0.01,
+                    cartesian_fraction_threshold=self.CARTESIAN_FRACTION_THRESHOLD,
                 )
                 return await self._finish_plan(traj, response)
 
     async def _finish_plan(self, traj, response):
-        if traj is None:
+        if traj is None or not traj.points:
             response.success = False
-            response.message = "Planning failed"
+            response.message = "Planning failed or returned an empty trajectory"
             return response
         self.get_logger().info(f"Executing ({len(traj.points)} pts)...")
         ok = await self._call_bridge_arm(traj)
@@ -152,6 +206,7 @@ class PlanningNode(Node):
     async def _handle_gripper(self, data, response):
         pos = float(data.strip())
         self.get_logger().info(f"Gripper: {pos:.3f}")
+        self._stop_requested.clear()
         goal = GripperCommand.Goal()
         goal.command.position = pos
         goal.command.max_effort = 50.0
@@ -161,10 +216,40 @@ class PlanningNode(Node):
             return response
         gh = await self._gripper_client.send_goal_async(goal)
         if gh is not None and gh.accepted:
-            action_result = await gh.get_result_async()
-            command_result = action_result.result
-            response.success = action_result.status == GoalStatus.STATUS_SUCCEEDED and command_result.reached_goal
-            response.message = "done" if response.success else "gripper execution failed"
+            with self._active_goal_lock:
+                self._active_gripper_goal = gh
+                should_cancel = self._stop_requested.is_set()
+            if should_cancel:
+                gh.cancel_goal_async()
+            try:
+                action_result = await gh.get_result_async()
+                command_result = action_result.result
+                action_succeeded = action_result.status == GoalStatus.STATUS_SUCCEEDED
+                reached_goal = bool(command_result.reached_goal)
+                contact_stall = pos > 0.0 and bool(command_result.stalled)
+                response.success = (
+                    not self._stop_requested.is_set()
+                    and action_succeeded
+                    and (reached_goal or contact_stall)
+                )
+                if contact_stall and response.success and not reached_goal:
+                    self.get_logger().info(
+                        f"Gripper contact detected at position={command_result.position:.3f}; "
+                        "accepting close as successful"
+                    )
+                elif not response.success:
+                    self.get_logger().warn(
+                        f"Gripper action failed: status={action_result.status}, "
+                        f"position={command_result.position:.3f}, "
+                        f"stalled={command_result.stalled}, "
+                        f"reached_goal={command_result.reached_goal}"
+                    )
+                response.message = "contact detected" if contact_stall and response.success else (
+                    "done" if response.success else "gripper execution failed"
+                )
+            finally:
+                with self._active_goal_lock:
+                    self._active_gripper_goal = None
         else:
             response.success = False
             response.message = "rejected"
@@ -181,10 +266,33 @@ class PlanningNode(Node):
             return False
         gh = await self._traj_client.send_goal_async(goal)
         if gh is not None and gh.accepted:
-            action_result = await gh.get_result_async()
-            command_result = action_result.result
-            return action_result.status == GoalStatus.STATUS_SUCCEEDED and command_result.error_code == FollowJointTrajectory.Result.SUCCESSFUL
+            with self._active_goal_lock:
+                self._active_arm_goal = gh
+                should_cancel = self._stop_requested.is_set()
+            if should_cancel:
+                gh.cancel_goal_async()
+            try:
+                action_result = await gh.get_result_async()
+                command_result = action_result.result
+                return (
+                    not self._stop_requested.is_set()
+                    and action_result.status == GoalStatus.STATUS_SUCCEEDED
+                    and command_result.error_code == FollowJointTrajectory.Result.SUCCESSFUL
+                )
+            finally:
+                with self._active_goal_lock:
+                    self._active_arm_goal = None
         return False
+
+    def _stop_motion_cb(self, msg):
+        if msg is None or not msg.data:
+            return
+        self._stop_requested.set()
+        with self._active_goal_lock:
+            goals = [self._active_arm_goal, self._active_gripper_goal]
+        for goal in goals:
+            if goal is not None:
+                goal.cancel_goal_async()
 
     @staticmethod
     def _rpy_to_quat(roll, pitch, yaw):

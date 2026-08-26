@@ -234,6 +234,7 @@ class MoveIt2:
             callback_group=callback_group,
         )
         self.__cartesian_path_request = GetCartesianPath.Request()
+        self.__cartesian_path_request.avoid_collisions = True
 
         # Create action client for trajectory execution
         self._execute_trajectory_action_client = ActionClient(
@@ -2370,7 +2371,7 @@ class MoveIt2:
 
     @property
     def cartesian_avoid_collisions(self) -> bool:
-        return self.__cartesian_path_request.request.avoid_collisions
+        return self.__cartesian_path_request.avoid_collisions
 
     @cartesian_avoid_collisions.setter
     def cartesian_avoid_collisions(self, value: bool):
@@ -2378,7 +2379,7 @@ class MoveIt2:
 
     @property
     def cartesian_jump_threshold(self) -> float:
-        return self.__cartesian_path_request.request.jump_threshold
+        return self.__cartesian_path_request.jump_threshold
 
     @cartesian_jump_threshold.setter
     def cartesian_jump_threshold(self, value: float):
@@ -2386,7 +2387,7 @@ class MoveIt2:
 
     @property
     def cartesian_prismatic_jump_threshold(self) -> float:
-        return self.__cartesian_path_request.request.prismatic_jump_threshold
+        return self.__cartesian_path_request.prismatic_jump_threshold
 
     @cartesian_prismatic_jump_threshold.setter
     def cartesian_prismatic_jump_threshold(self, value: float):

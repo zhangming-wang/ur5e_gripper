@@ -4,6 +4,7 @@
 ros2 service call /detect_object custom_msgs/srv/DetectObject {}
 """
 
+import os
 import cv2
 import numpy as np
 import threading
@@ -39,7 +40,9 @@ class PerceptionNode(Node):
         self.declare_parameter("hsv_lower_2", [170, 100, 50])
         self.declare_parameter("hsv_upper_2", [180, 255, 255])
         self.declare_parameter("min_contour_area", 200.0)
+        self.declare_parameter("display_enabled", True)
         self.declare_parameter("default_depth", 1.0)
+        self.declare_parameter("max_frame_age", 0.15)
 
         self._env = str(self.get_parameter("env_prefix").value)
         self._fx = float(self.get_parameter("fx").value)
@@ -50,6 +53,7 @@ class PerceptionNode(Node):
         self._roi_bottom = float(self.get_parameter("roi_bottom").value)
         self._min_contour_area = float(self.get_parameter("min_contour_area").value)
         self._default_depth = float(self.get_parameter("default_depth").value)
+        self._max_frame_age = float(self.get_parameter("max_frame_age").value)
 
         translation = np.asarray(self.get_parameter("camera_to_base_translation").value, dtype=float).reshape(-1)
         rotation = np.asarray(self.get_parameter("camera_to_base_rotation").value, dtype=float).reshape(-1)
@@ -64,8 +68,8 @@ class PerceptionNode(Node):
             raise ValueError("fx and fy must be positive")
         if not 0.0 <= self._roi_top < self._roi_bottom <= 1.0:
             raise ValueError("roi_top and roi_bottom must satisfy 0 <= top < bottom <= 1")
-        if self._min_contour_area < 0 or self._default_depth <= 0:
-            raise ValueError("min_contour_area must be non-negative and default_depth positive")
+        if self._min_contour_area < 0 or self._default_depth <= 0 or self._max_frame_age < 0:
+            raise ValueError("min_contour_area/default_depth/max_frame_age values are invalid")
 
         def hsv_parameter(name):
             values = np.asarray(self.get_parameter(name).value, dtype=float).reshape(-1)
@@ -104,17 +108,27 @@ class PerceptionNode(Node):
         self._origin_image = None
         self._detected_image = None
         self._display_lock = threading.Lock()
-        self._display_thread = threading.Thread(target=self._display_loop, daemon=True)
-        self._display_thread.start()
+        self._display_enabled = (
+            bool(self.get_parameter("display_enabled").value)
+            and bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+            and os.environ.get("QT_QPA_PLATFORM", "").lower() not in {"offscreen", "minimal"}
+        )
+        if self._display_enabled:
+            self._display_thread = threading.Thread(target=self._display_loop, daemon=True)
+            self._display_thread.start()
 
         self.get_logger().info(f"Perception node ready (env_prefix={self._env})")
 
     def _resolve_topic(self, topic):
         return topic.replace("{env_prefix}", self._env)
 
+    @staticmethod
+    def _stamp_ns(msg):
+        return int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
+
     def _rgb_callback(self, msg: Image):
         try:
-            self._latest_rgb = (self.get_clock().now(),
+            self._latest_rgb = (self._stamp_ns(msg),
                                 self._bridge.imgmsg_to_cv2(msg, "bgr8"))
             with self._display_lock:
                 self._origin_image = self._latest_rgb[1]
@@ -123,8 +137,12 @@ class PerceptionNode(Node):
 
     def _depth_callback(self, msg: Image):
         try:
-            self._latest_depth = (self.get_clock().now(),
-                                  self._bridge.imgmsg_to_cv2(msg, "32FC1"))
+            depth = self._bridge.imgmsg_to_cv2(msg, "passthrough")
+            if msg.encoding == "16UC1":
+                depth = depth.astype(np.float32) / 1000.0
+            else:
+                depth = depth.astype(np.float32, copy=False)
+            self._latest_depth = (self._stamp_ns(msg), depth)
         except Exception as e:
             self.get_logger().warn(f"Depth error: {e}")
 
@@ -133,8 +151,12 @@ class PerceptionNode(Node):
             response.detected = False
             return response
 
-        _, rgb = self._latest_rgb
-        depth = self._latest_depth[1] if self._latest_depth else None
+        rgb_stamp, rgb = self._latest_rgb
+        depth = None
+        if self._latest_depth:
+            depth_stamp, candidate = self._latest_depth
+            if abs(rgb_stamp - depth_stamp) <= self._max_frame_age * 1e9:
+                depth = candidate
         result = self._detect(rgb, depth)
 
         response.x = result.get("x", 0.0)
@@ -240,12 +262,20 @@ class PerceptionNode(Node):
             # 缩放中心点到深度分辨率
             dcx = int(cx * dw / w_rgb)
             dcy = int(cy * dh / h_rgb)
-            z = float(depth[dcy, dcx]) if 0 <= dcx < dw and 0 <= dcy < dh else self._default_depth
+            if not (0 <= dcx < dw and 0 <= dcy < dh):
+                return {"detected": False}
+            y0, y1 = max(0, dcy - 2), min(dh, dcy + 3)
+            x0, x1 = max(0, dcx - 2), min(dw, dcx + 3)
+            patch = depth[y0:y1, x0:x1]
+            valid = patch[np.isfinite(patch) & (patch > 0)]
+            if not valid.size:
+                return {"detected": False}
+            z = float(np.median(valid))
         else:
-            z = self._default_depth
+            return {"detected": False}
 
         if not np.isfinite(z) or z <= 0:
-            z = self._default_depth
+            return {"detected": False}
 
         x_cam = (cx - self._cx) / self._fx * z
         y_cam = (cy - self._cy) / self._fy * z

@@ -8,6 +8,13 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <depend>mujoco_ros2_control_plugins</depend>
+  <depend>mujoco_ros2_control_msgs</depend>
+  <depend>mujoco_vendor</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>std_srvs</depend>
+  <depend>trajectory_msgs</depend>
   <exec_depend>description</exec_depend>
   <exec_depend>mujoco_ros2_control</exec_depend>
   <exec_depend>controller_manager</exec_depend>
@@ -15,7 +22,6 @@
   <exec_depend>joint_state_broadcaster</exec_depend>
   <exec_depend>position_controllers</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
-  <exec_depend>mujoco_vendor</exec_depend>
   <exec_depend>xacro</exec_depend>
 
   <export>

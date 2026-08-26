@@ -1,7 +1,7 @@
 <mujoco model="ur5e">
   <compiler angle="radian" meshdir="assets" autolimits="true"/>
 
-  <option integrator="implicitfast"/>
+  <option integrator="implicitfast" cone="elliptic" impratio="10"/>
 
   <default>
     <default class="ur5e">
@@ -131,6 +131,6 @@
   </actuator>
 
   <keyframe>
-    <key name="home" qpos="-1.5708 -1.5708 1.5708 -1.5708 -1.5708 0" ctrl="-1.5708 -1.5708 1.5708 -1.5708 -1.5708 0"/>
+    <key name="home" qpos="0 -1.5708 1.5708 0 1.5708 0" ctrl="0 -1.5708 1.5708 0 1.5708 0"/>
   </keyframe>
 </mujoco>

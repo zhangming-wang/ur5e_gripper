@@ -20,3 +20,4 @@ perception_node:
     hsv_upper_2: [180, 255, 255]
     min_contour_area: 200.0
     default_depth: 1.0
+    max_frame_age: 0.15

@@ -13,7 +13,12 @@ bridge = Path(
     "exts",
     "isaacsim.ros2.bridge",
 )
-distro = "humble" if (bridge / "humble").is_dir() else "jazzy"
+distro = os.environ.get("ISAACLAB_ROS_DISTRO", "humble")
+if not (bridge / distro).is_dir():
+    raise RuntimeError(
+        f"Isaac Sim ROS 2 bridge for '{distro}' was not found under {bridge}; "
+        "set ISAACLAB_ROS_DISTRO only when the matching bridge is installed"
+    )
 root = bridge / distro
 rclpy_dir = str(root / "rclpy")
 lib_dir = str(root / "lib")

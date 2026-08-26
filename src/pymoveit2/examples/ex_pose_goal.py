@@ -33,9 +33,9 @@ def main():
     # Declare parameters for cartesian planning
     node.declare_parameter("cartesian", False)
     node.declare_parameter("cartesian_max_step", 0.0025)
-    node.declare_parameter("cartesian_fraction_threshold", 0.0)
+    node.declare_parameter("cartesian_fraction_threshold", 0.99)
     node.declare_parameter("cartesian_jump_threshold", 0.0)
-    node.declare_parameter("cartesian_avoid_collisions", False)
+    node.declare_parameter("cartesian_avoid_collisions", True)
 
     # Create callback group that allows execution of callbacks in parallel without restrictions
     callback_group = ReentrantCallbackGroup()

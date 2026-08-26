@@ -1,4 +1,5 @@
 <mujoco model="ur5e scene">
+  <option integrator="implicitfast" cone="elliptic" impratio="10"/>
   <include file="ur5e.xml"/>
 
   <visual>

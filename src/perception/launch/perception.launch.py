@@ -14,6 +14,7 @@ def generate_launch_description():
         [
             DeclareLaunchArgument("params_file", default_value=default_params),
             DeclareLaunchArgument("env_prefix", default_value="env_0"),
+            DeclareLaunchArgument("use_sim_time", default_value="false"),
             Node(
                 package="perception",
                 executable="perception_node",
@@ -21,7 +22,10 @@ def generate_launch_description():
                 output="screen",
                 parameters=[
                     LaunchConfiguration("params_file"),
-                    {"env_prefix": LaunchConfiguration("env_prefix")},
+                    {
+                        "env_prefix": LaunchConfiguration("env_prefix"),
+                        "use_sim_time": LaunchConfiguration("use_sim_time"),
+                    },
                 ],
             ),
         ]

@@ -2,7 +2,7 @@
 """MuJoCo 模式 — ros2_control 启动文件。"""
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction, Shutdown
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, Shutdown, TimerAction
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue, ParameterFile
@@ -16,6 +16,7 @@ def launch_setup(context, *args, **kwargs):
     urdf_xacro = PathJoinSubstitution([pkgs_mujoco, "urdf", "ur5e_mujoco.urdf.xacro"])
     mujoco_scene = PathJoinSubstitution([pkgs_mujoco, "xml", "combined", "scene.xml"])
     controllers_file = PathJoinSubstitution([pkgs_mujoco, "config", "mujoco_controllers.yaml"])
+    plugins_file = PathJoinSubstitution([pkgs_mujoco, "config", "mujoco_plugins.yaml"])
 
     robot_description_content = Command(
         [
@@ -49,27 +50,43 @@ def launch_setup(context, *args, **kwargs):
             parameters=[
                 {"use_sim_time": True},
                 ParameterFile(controllers_file),
+                ParameterFile(plugins_file),
             ],
             remappings=[("~/robot_description", "/robot_description")],
             on_exit=Shutdown(),
         ),
-        Node(
-            package="controller_manager",
-            executable="spawner",
-            arguments=["joint_state_broadcaster", "--param-file", controllers_file],
-            output="both",
+        TimerAction(
+            period=4.0,
+            actions=[
+                Node(
+                    package="controller_manager",
+                    executable="spawner",
+                    arguments=["joint_state_broadcaster", "--param-file", controllers_file],
+                    output="both",
+                ),
+            ],
         ),
-        Node(
-            package="controller_manager",
-            executable="spawner",
-            arguments=["joint_trajectory_controller", "--param-file", controllers_file],
-            output="both",
+        TimerAction(
+            period=8.0,
+            actions=[
+                Node(
+                    package="controller_manager",
+                    executable="spawner",
+                    arguments=["joint_trajectory_controller", "--param-file", controllers_file, "--controller-manager", "/controller_manager"],
+                    output="both",
+                ),
+            ],
         ),
-        Node(
-            package="controller_manager",
-            executable="spawner",
-            arguments=["robotiq_gripper_controller", "--param-file", controllers_file],
-            output="both",
+        TimerAction(
+            period=12.0,
+            actions=[
+                Node(
+                    package="controller_manager",
+                    executable="spawner",
+                    arguments=["robotiq_gripper_controller", "--param-file", controllers_file, "--controller-manager", "/controller_manager"],
+                    output="both",
+                ),
+            ],
         ),
     ]
 

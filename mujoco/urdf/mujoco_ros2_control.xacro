@@ -7,6 +7,8 @@
         <plugin>mujoco_ros2_control/MujocoSystemInterface</plugin>
         <param name="mujoco_model">${mujoco_model_path}</param>
         <param name="headless">${headless}</param>
+        <param name="sim_speed_factor">1.0</param>
+        <param name="camera_publish_rate">10.0</param>
       </hardware>
 
       <joint name="shoulder_pan_joint">
@@ -52,6 +54,13 @@
         <state_interface name="velocity"/>
         <state_interface name="effort"/>
       </joint>
+
+      <sensor name="gemini2_camera">
+        <param name="frame_name">gemini2_camera_frame</param>
+        <param name="info_topic">/env_0/gemini2/camera_info</param>
+        <param name="image_topic">/env_0/gemini2/rgb</param>
+        <param name="depth_topic">/env_0/gemini2/depth</param>
+      </sensor>
     </ros2_control>
   </xacro:macro>
 </robot>

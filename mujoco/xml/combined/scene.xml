@@ -1,9 +1,16 @@
 <mujoco model="ur5e scene">
   <compiler angle="radian" meshdir="assets/"/>
 
-  <option integrator="implicitfast"/>
+  <option
+    integrator="implicitfast"
+    solver="Newton"
+    cone="elliptic"
+    impratio="10"
+    tolerance="1e-10"
+    noslip_iterations="5"
+    noslip_tolerance="1e-10"/>
 
-  <size nkey="1"/>
+  <size nkey="2"/>
 
   <visual>
     <global azimuth="120" elevation="-20"/>
@@ -41,7 +48,7 @@
         <mesh scale="0.001 0.001 0.001"/>
         <general biastype="affine"/>
         <default class="/driver">
-          <joint solreflimit="0.005" solimplimit="0.95 0.99" range="0 0.9" armature="0.005" damping="0.1"/>
+          <joint solreflimit="0.005" solimplimit="0.95 0.99" range="0 0.8" armature="0.005" damping="0.1"/>
         </default>
         <default class="/follower">
           <joint solreflimit="0.005" solimplimit="0.95 0.99" range="-0.872664 0.9" armature="0.001"/>
@@ -58,10 +65,10 @@
         <default class="/collision">
           <geom type="mesh" group="3"/>
           <default class="/pad_box1">
-            <geom size="0.002 0.011 0.009375" type="box" priority="1" friction="0.7" solref="0.004" solimp="0.95 0.99" rgba="0.55 0.55 0.55 1"/>
+            <geom size="0.002 0.011 0.009375" type="box" priority="1" friction="1.5" solref="0.004" solimp="0.95 0.99" rgba="0.55 0.55 0.55 1"/>
           </default>
           <default class="/pad_box2">
-            <geom size="0.002 0.011 0.009375" type="box" priority="1" friction="0.6" solref="0.004" solimp="0.95 0.99" rgba="0.45 0.45 0.45 1"/>
+            <geom size="0.002 0.011 0.009375" type="box" priority="1" friction="1.5" solref="0.004" solimp="0.95 0.99" rgba="0.45 0.45 0.45 1"/>
           </default>
         </default>
       </default>
@@ -113,6 +120,21 @@
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
     <light name="spotlight" target="wrist_2_link" pos="0 -1 2" dir="0 0 -1" mode="targetbodycom"/>
     <light pos="0 0 1.5" dir="0 0 -1" type="directional"/>
+    <!-- Object area aligned with the IsaacLab pick-and-place scene. -->
+    <!-- The tray top is z=0.040 m relative to the robot base. -->
+    <geom name="left_tray" type="box" size="0.20 0.13 0.02" pos="0 -0.5 0.020"
+          rgba="0.35 0.35 0.35 1" contype="1" conaffinity="1"/>
+    <geom name="right_tray" type="box" size="0.20 0.13 0.02" pos="0 0.5 0.020"
+          rgba="0.35 0.35 0.35 1" contype="1" conaffinity="1"/>
+    <!-- The scene plugin places this free body; MuJoCo then simulates its fall and contacts. -->
+    <body name="cube_0" pos="0 0 0">
+      <freejoint name="cube_free_joint"/>
+      <geom name="cube_0_geom" type="box" size="0.015 0.015 0.015"
+            rgba="1 0 0 1" mass="0.05" contype="1" conaffinity="1"/>
+    </body>
+    <!-- Published by mujoco_ros2_control as an RGB-D camera. -->
+    <camera name="gemini2_camera" mode="fixed" fovy="55.3" resolution="1280 720"
+            pos="0 -0.5 0.8" xyaxes="1 0 0 0 1 0"/>
     <body name="base" childclass="ur5e" quat="0 0 0 -1">
       <inertial pos="0 0 0" mass="4" diaginertia="0.00443333 0.00443333 0.0072"/>
       <geom class="visual" material="black" mesh="base_0"/>
@@ -260,16 +282,20 @@
   </tendon>
 
   <actuator>
-    <position name="shoulder_pan_joint" joint="shoulder_pan_joint" kp="2000" dampratio="1.0" ctrlrange="-3.1415 3.1415"/>
-    <position name="shoulder_lift_joint" joint="shoulder_lift_joint" kp="2000" dampratio="1.0" ctrlrange="-3.1415 3.1415"/>
-    <position name="elbow_joint" joint="elbow_joint" kp="2000" dampratio="1.0" ctrlrange="-3.1415 3.1415"/>
-    <position name="wrist_1_joint" joint="wrist_1_joint" kp="2000" dampratio="1.0" ctrlrange="-3.1415 3.1415"/>
-    <position name="wrist_2_joint" joint="wrist_2_joint" kp="2000" dampratio="1.0" ctrlrange="-3.1415 3.1415"/>
-    <position name="wrist_3_joint" joint="wrist_3_joint" kp="2000" dampratio="1.0" ctrlrange="-3.1415 3.1415"/>
-    <position name="robotiq_85_left_knuckle_joint" tendon="/split" kp="500" dampratio="1.0" ctrlrange="0.0 0.8"/>
+    <position name="shoulder_pan_joint" joint="shoulder_pan_joint" kp="2000" dampratio="1.0" ctrlrange="-6.2831 6.2831" forcelimited="true" forcerange="-150 150"/>
+    <position name="shoulder_lift_joint" joint="shoulder_lift_joint" kp="2000" dampratio="1.0" ctrlrange="-6.2831 6.2831" forcelimited="true" forcerange="-150 150"/>
+    <position name="elbow_joint" joint="elbow_joint" kp="2000" dampratio="1.0" ctrlrange="-3.1415 3.1415" forcelimited="true" forcerange="-150 150"/>
+    <position name="wrist_1_joint" joint="wrist_1_joint" kp="2000" dampratio="1.0" ctrlrange="-6.2831 6.2831" forcelimited="true" forcerange="-28 28"/>
+    <position name="wrist_2_joint" joint="wrist_2_joint" kp="2000" dampratio="1.0" ctrlrange="-6.2831 6.2831" forcelimited="true" forcerange="-28 28"/>
+    <position name="wrist_3_joint" joint="wrist_3_joint" kp="2000" dampratio="1.0" ctrlrange="-6.2831 6.2831" forcelimited="true" forcerange="-28 28"/>
+    <position name="robotiq_85_left_knuckle_joint" tendon="/split" kp="500" dampratio="1.0" ctrlrange="0.0 0.8" forcelimited="true" forcerange="-100 100"/>
   </actuator>
 
   <keyframe>
-    <key name="home" qpos="-1.5708 -1.5708 1.5708 -1.5708 -1.5708 0 0 0 0 0 0 0" ctrl="-1.5708 -1.5708 1.5708 -1.5708 -1.5708 0 0"/>
+    <!-- qpos order: cube freejoint, six arm joints, six gripper joints. -->
+    <!-- Keep the inactive cube on the floor far outside the work area. -->
+    <key name="home" qpos="10 10 0.015 1 0 0 0 0 -1.5708 1.5708 0 1.5708 0 0 0 0 0 0 0" ctrl="0 -1.5708 1.5708 0 1.5708 0 0"/>
+    <!-- The plugin copies the latest robot state here and replaces only the cube pose before spawn. -->
+    <key name="spawn" qpos="0 -0.5 0.075 1 0 0 0 0 -1.5708 1.5708 0 1.5708 0 0 0 0 0 0 0" ctrl="0 -1.5708 1.5708 0 1.5708 0 0"/>
   </keyframe>
 </mujoco>

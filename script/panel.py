@@ -7,9 +7,12 @@ import math
 from datetime import datetime
 
 import rclpy
+from rclpy.action import ActionClient
 from rclpy.node import Node
-from custom_msgs.srv import PlanExecute
+from custom_msgs.action import PickAndPlace
+from custom_msgs.srv import DetectObject, PlanExecute
 from sensor_msgs.msg import JointState
+from std_srvs.srv import Trigger
 from pymoveit2 import MoveIt2
 
 from PySide6.QtWidgets import (
@@ -30,6 +33,15 @@ class RosClient(Node):
     def __init__(self):
         super().__init__("gui_debug_panel")
         self.cli = self.create_client(PlanExecute, "/plan_execute")
+        self.spawn_cli = self.create_client(Trigger, "/spawn_cube")
+        self.detect_cli = self.create_client(DetectObject, "/detect_object")
+        self.pick_client = ActionClient(self, PickAndPlace, "/pick_and_place")
+        self._pick_active = False
+        self._pick_goal_handle = None
+        self._pick_goal_future = None
+        self._pick_cancel_requested = False
+        self._pick_done_callback = None
+        self._pick_feedback_callback = None
 
         # 实时关节状态
         self.joint_positions = {}     # name → rad
@@ -62,6 +74,102 @@ class RosClient(Node):
         rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
         res = future.result()
         return (res.success, res.message) if res else (False, "")
+
+    def spawn_cube(self):
+        if not self.spawn_cli.wait_for_service(timeout_sec=0.5):
+            return False, "/spawn_cube service not ready"
+        future = self.spawn_cli.call_async(Trigger.Request())
+        rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+        res = future.result()
+        return (res.success, res.message) if res else (False, "spawn service timeout")
+
+    def detect_cube(self):
+        if not self.detect_cli.wait_for_service(timeout_sec=0.5):
+            return False, "/detect_object service not ready"
+        future = self.detect_cli.call_async(DetectObject.Request())
+        rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
+        res = future.result()
+        if res is None:
+            return False, "detect service timeout"
+        if not res.detected:
+            return False, "cube not detected"
+        return True, (
+            f"cube: x={res.x:.3f}, y={res.y:.3f}, z={res.z:.3f}, "
+            f"yaw={math.degrees(res.yaw):.1f} deg"
+        )
+
+    def start_pick_and_place(self, on_done, on_feedback):
+        if self._pick_active:
+            return False, "pick-and-place already running"
+        if not self.pick_client.wait_for_server(timeout_sec=0.5):
+            return False, "/pick_and_place action not ready"
+
+        self._pick_active = True
+        self._pick_cancel_requested = False
+        self._pick_done_callback = on_done
+        self._pick_feedback_callback = on_feedback
+        try:
+            future = self.pick_client.send_goal_async(
+                PickAndPlace.Goal(), feedback_callback=self._pick_feedback)
+            self._pick_goal_future = future
+            future.add_done_callback(self._pick_goal_response)
+        except Exception as exc:
+            self._finish_pick(False, str(exc))
+            return False, str(exc)
+        return True, "pick-and-place started"
+
+    def cancel_pick_and_place(self):
+        if not self._pick_active:
+            return False, "no pick-and-place action is running"
+        self._pick_cancel_requested = True
+        if self._pick_goal_handle is not None:
+            try:
+                self._pick_goal_handle.cancel_goal_async()
+            except Exception as exc:
+                return False, str(exc)
+        return True, "pick-and-place cancellation requested"
+
+    def _pick_feedback(self, feedback_message):
+        if self._pick_feedback_callback is not None:
+            feedback = feedback_message.feedback
+            self._pick_feedback_callback(feedback.current_step, feedback.status)
+
+    def _pick_goal_response(self, future):
+        self._pick_goal_future = None
+        try:
+            goal_handle = future.result()
+        except Exception as exc:
+            self._finish_pick(False, str(exc))
+            return
+        if not goal_handle.accepted:
+            self._finish_pick(False, "pick-and-place goal rejected")
+            return
+        self._pick_goal_handle = goal_handle
+        if self._pick_cancel_requested:
+            try:
+                goal_handle.cancel_goal_async()
+            except Exception as exc:
+                self._finish_pick(False, str(exc))
+                return
+        goal_handle.get_result_async().add_done_callback(self._pick_result)
+
+    def _pick_result(self, future):
+        try:
+            result = future.result().result
+            self._finish_pick(result.success, result.message)
+        except Exception as exc:
+            self._finish_pick(False, str(exc))
+
+    def _finish_pick(self, success, message):
+        callback = self._pick_done_callback
+        self._pick_active = False
+        self._pick_goal_handle = None
+        self._pick_goal_future = None
+        self._pick_cancel_requested = False
+        self._pick_done_callback = None
+        self._pick_feedback_callback = None
+        if callback is not None:
+            callback(success, message)
 
     def fk_abs(self, joints_deg):
         """joints_deg: 6 个关节角(度)"""
@@ -110,6 +218,7 @@ class RosClient(Node):
 
 
 class MainWindow(QMainWindow):
+    LOOP_INTERVAL_MS = 500
     ARM_JOINTS = [
         ("joint1", -360, 360, 0),
         ("joint2", -360, 360, -90),
@@ -124,6 +233,11 @@ class MainWindow(QMainWindow):
         self.ros = ros_node
         self.setWindowTitle("UR5e + Gripper 调试面板")
         self._shutting_down = False
+        self._loop_active = False
+        self._loop_cycle = 0
+        self._loop_timer = QTimer(self)
+        self._loop_timer.setSingleShot(True)
+        self._loop_timer.timeout.connect(self._start_loop_cycle)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -158,7 +272,7 @@ class MainWindow(QMainWindow):
         root.addWidget(arm)
 
         # ==================== 夹爪 ====================
-        grip = QGroupBox("夹爪 (0.0=闭合  0.8=全开)")
+        grip = QGroupBox("夹爪 (0.0=张开  0.8=闭合)")
         grip_layout = QVBoxLayout(grip)
 
         row = QHBoxLayout()
@@ -216,6 +330,33 @@ class MainWindow(QMainWindow):
         wp_outer.addLayout(btn_layout)
 
         root.addWidget(wp_group, stretch=1)
+
+        # ==================== 检测抓取 ====================
+        debug_group = QGroupBox("检测抓取")
+        debug_layout = QHBoxLayout(debug_group)
+        self.debug_buttons = []
+        buttons = [
+            ("生成 Cube", self._on_spawn_cube),
+            ("检测", self._on_detect_cube),
+        ]
+        for text, slot in buttons:
+            button = QPushButton(text)
+            button.setMinimumHeight(32)
+            button.clicked.connect(slot)
+            debug_layout.addWidget(button, stretch=1)
+            self.debug_buttons.append(button)
+        self.single_pick_button = QPushButton("单次抓取")
+        self.single_pick_button.setMinimumHeight(32)
+        self.single_pick_button.clicked.connect(self._on_pick_cube)
+        debug_layout.addWidget(self.single_pick_button, stretch=1)
+        self.debug_buttons.append(self.single_pick_button)
+
+        self.loop_pick_button = QPushButton("循环抓取")
+        self.loop_pick_button.setMinimumHeight(32)
+        self.loop_pick_button.clicked.connect(self._on_loop_pick_cube)
+        debug_layout.addWidget(self.loop_pick_button, stretch=1)
+        self.debug_buttons.append(self.loop_pick_button)
+        root.addWidget(debug_group)
 
         # ==================== 日志 ====================
         log_group = QGroupBox("日志")
@@ -290,6 +431,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._shutting_down = True
+        self._loop_active = False
+        self._loop_timer.stop()
+        if self.ros._pick_active:
+            self.ros.cancel_pick_and_place()
         super().closeEvent(event)
 
     def _log(self, text, level="info"):
@@ -316,6 +461,102 @@ class MainWindow(QMainWindow):
             self._log(f"[OK] {msg}", "info")
         else:
             self._log(f"[FAIL] {msg}", "error")
+
+    def _on_spawn_cube(self):
+        self._send("生成 Cube", self.ros.spawn_cube)
+
+    def _on_detect_cube(self):
+        self._send("检测方块", self.ros.detect_cube)
+
+    def _set_debug_buttons_enabled(self, enabled):
+        for button in self.debug_buttons:
+            button.setEnabled(enabled)
+
+    def _reset_pick_ui(self):
+        self._loop_active = False
+        self._loop_timer.stop()
+        self._set_debug_buttons_enabled(True)
+        self.loop_pick_button.setText("循环抓取")
+
+    def _start_pick_action(self):
+        if self._shutting_down or self.ros._pick_active:
+            return
+        if self._loop_active:
+            self._loop_cycle += 1
+            self._log(f"开始循环抓取第 {self._loop_cycle} 轮...", "info")
+        else:
+            self._log("开始单次抓取...", "info")
+
+        started, message = self.ros.start_pick_and_place(
+            self._on_pick_done, self._on_pick_feedback
+        )
+        if started:
+            self._log(f"[OK] {message}", "info")
+            return
+
+        self._log(f"[FAIL] {message}", "error")
+        self._reset_pick_ui()
+
+    def _on_pick_cube(self):
+        if self._shutting_down or self.ros._pick_active or self._loop_active:
+            return
+        self._set_debug_buttons_enabled(False)
+        self._start_pick_action()
+
+    def _on_loop_pick_cube(self):
+        if self._shutting_down:
+            return
+
+        if self._loop_active:
+            self._loop_active = False
+            self._loop_timer.stop()
+            self._set_debug_buttons_enabled(False)
+            self.loop_pick_button.setText("停止中...")
+            canceled, message = self.ros.cancel_pick_and_place()
+            self._log(message, "info" if canceled else "warn")
+            if not self.ros._pick_active:
+                self._reset_pick_ui()
+            return
+
+        if self.ros._pick_active:
+            return
+        self._loop_active = True
+        self._loop_cycle = 0
+        self.loop_pick_button.setText("停止循环")
+        self._set_debug_buttons_enabled(False)
+        self.loop_pick_button.setEnabled(True)
+        self._start_pick_action()
+
+    def _start_loop_cycle(self):
+        if not self._loop_active or self._shutting_down:
+            return
+        if self.ros._pick_active:
+            return
+        self._set_debug_buttons_enabled(False)
+        self.loop_pick_button.setEnabled(True)
+        self.loop_pick_button.setText("停止循环")
+        self._start_pick_action()
+
+    def _on_pick_feedback(self, step, status):
+        self._log(f"抓取 [{step}/11] {status}", "info")
+
+    def _on_pick_done(self, success, message):
+        status = "OK" if success else "FAIL"
+        self._log(f"[{status}] {message}", "info" if success else "error")
+        if self._loop_active and success and not self._shutting_down:
+            self._log(
+                f"第 {self._loop_cycle} 轮完成，{self.LOOP_INTERVAL_MS / 1000:.1f}s 后开始下一轮",
+                "info",
+            )
+            self._set_debug_buttons_enabled(False)
+            self.loop_pick_button.setEnabled(True)
+            self.loop_pick_button.setText("停止循环")
+            self._loop_timer.start(self.LOOP_INTERVAL_MS)
+            return
+
+        if self._loop_active and not success:
+            self._log("循环抓取因本轮失败而停止", "error")
+        self._reset_pick_ui()
 
     def _on_arm_change(self):
         joints = [s.value() for s in self.joint_sliders]

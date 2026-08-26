@@ -1,4 +1,4 @@
-string command_type   # "pose" / "joints" / "gripper"
+string command_type   # "ik_abs" / "ik_rel" / "fk_abs" / "fk_rel" / "gripper"
 string data            # args
 ---
 bool success

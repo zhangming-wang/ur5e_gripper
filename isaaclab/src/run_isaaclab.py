@@ -5,6 +5,7 @@ IsaacLab hosts FollowJointTrajectory action server — MoveIt plans, IsaacLab ex
 
 import argparse
 from pathlib import Path
+import sys
 
 from isaaclab.app import AppLauncher
 import set_isaaclab_env
@@ -231,7 +232,8 @@ class MainLoop:
             self.init()
             self.exec()
         except Exception as e:
-            print(f"[INFO] Simulation interrupted: {e}")
+            print(f"[ERROR] Simulation stopped: {e}", file=sys.stderr)
+            raise
         finally:
             if self.control_node is not None:
                 self.control_node.destroy_node()
@@ -297,6 +299,7 @@ class MainLoop:
                 cam.update(self.sim_dt)
 
             self.sim.step()
+            self.control_node.advance_sim_time(self.sim_dt)
 
     def _init_robot(self):
         p = self.control_node.init_pos.copy()
@@ -323,6 +326,10 @@ class MainLoop:
         stage = omni.usd.get_context().get_stage()
         cube_path = "/World/cube_0"
         cube_size = 0.03  # 3cm
+
+        old_cube = stage.GetPrimAtPath(cube_path)
+        if old_cube.IsValid():
+            stage.RemovePrim(cube_path)
 
         # 左托盘表面，矩形区域内随机位置
         # spawn_x, spawn_y, spawn_z = 0.0, 0.5, 0.8
@@ -399,7 +406,12 @@ class MainLoop:
         stage = omni.usd.get_context().get_stage()
         for env_path in sim_utils.find_matching_prim_paths("/World/envs/env_.*"):
             env = env_path.split("/")[-1]
-            cam_mat = UsdGeom.Xformable(stage.GetPrimAtPath(f"{env_path}/gemini2")).ComputeLocalToWorldTransform(
+            rgb_path = f"{env_path}/gemini2/Orbbec_Gemini2/camera_rgb/camera_rgb/Stream_rgb"
+            cam_prim = stage.GetPrimAtPath(rgb_path)
+            if not cam_prim.IsValid():
+                print(f"[WARN] RGB camera prim not found: {rgb_path}")
+                continue
+            cam_mat = UsdGeom.Xformable(cam_prim).ComputeLocalToWorldTransform(
                 Usd.TimeCode.Default()
             )
             base_mat = UsdGeom.Xformable(stage.GetPrimAtPath(f"{env_path}/ur5e")).ComputeLocalToWorldTransform(
@@ -409,7 +421,7 @@ class MainLoop:
             cam_pos, cam_quat = _gf_to_pos_quat(cam_mat)
             base_pos, base_quat = _gf_to_pos_quat(base_mat)
 
-            _print_pose(cam_pos, cam_quat, f"cam_world[{env}]")
+            _print_pose(cam_pos, cam_quat, f"rgb_cam_world[{env}]")
             _print_pose(base_pos, base_quat, f"base_world[{env}]")
 
             # ---- numpy 手算 camera→base ----

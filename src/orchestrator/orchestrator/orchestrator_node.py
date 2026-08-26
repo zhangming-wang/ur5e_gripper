@@ -19,6 +19,11 @@ from custom_msgs.action import PickAndPlace
 
 
 class OrchestratorNode(Node):
+    CUBE_SETTLE_SECONDS = 1.0
+    PLACE_SETTLE_SECONDS = 0.5
+    PRE_GRASP_OFFSET = 0.25
+    GRASP_DESCENT = 0.075
+
     def __init__(self):
         super().__init__("orchestrator_node")
 
@@ -27,8 +32,8 @@ class OrchestratorNode(Node):
         self._spawn_cli = self.create_client(Trigger, "/spawn_cube")
         self._spawn_cli.wait_for_service()
 
-        self.get_logger().info("Waiting for /isaac_lab/reset ...")
-        self._reset_cli = self.create_client(Trigger, "/isaac_lab/reset")
+        self.get_logger().info("Waiting for /reset ...")
+        self._reset_cli = self.create_client(Trigger, "/reset")
         self._reset_cli.wait_for_service()
 
         self.get_logger().info("Waiting for /detect_object ...")
@@ -43,7 +48,7 @@ class OrchestratorNode(Node):
         self._cancel_requested = False
         self._goal_active = False
         self._goal_lock = threading.Lock()
-        self._stop_motion_pub = self.create_publisher(Bool, "/isaaclab/stop_motion", 10)
+        self._stop_motion_pub = self.create_publisher(Bool, "/stop_motion", 10)
 
         # Action Server
         self._action_server = ActionServer(
@@ -86,7 +91,11 @@ class OrchestratorNode(Node):
             cycle += 1
             try:
                 # -------- 0. 清除旧方块 --------
-                self._call(self._reset_cli, Trigger.Request(), timeout=5.0)
+                reset_res = self._call(self._reset_cli, Trigger.Request(), timeout=5.0)
+                if not reset_res or not reset_res.success:
+                    raise RuntimeError(
+                        f"Reset failed: {reset_res.message if reset_res else 'timeout'}"
+                    )
                 self._sleep(1.0)
                 self._assert_not_cancelled()
 
@@ -96,12 +105,17 @@ class OrchestratorNode(Node):
                 self._publish_feedback(goal_handle, 1, "Spawning cube...")
                 spawn_res = self._call(self._spawn_cli, Trigger.Request())
                 if not spawn_res or not spawn_res.success:
-                    raise RuntimeError(f"Spawn failed: {spawn_res.message if spawn_res else 'timeout'}")
+                    raise RuntimeError(
+                        f"Spawn failed: {spawn_res.message if spawn_res else 'timeout'}"
+                    )
                 self.get_logger().info("  ✓ cube spawned")
                 self._assert_not_cancelled()
 
-                # 等仿真物理落定
-                self._sleep(1.0)
+                # spawn service 只确认请求已接收；等待完整下落轨迹和图像刷新。
+                self.get_logger().info(
+                    f"Waiting {self.CUBE_SETTLE_SECONDS:.1f}s for cube to settle..."
+                )
+                self._sleep(self.CUBE_SETTLE_SECONDS)
                 self._assert_not_cancelled()
 
                 # -------- 2. 检测 --------
@@ -110,33 +124,45 @@ class OrchestratorNode(Node):
                 det_res = self._call(self._detect_cli, DetectObject.Request())
                 if not det_res or not det_res.detected:
                     raise RuntimeError("Detection failed — cube not found")
-                obj_x, obj_y, obj_z, obj_yaw = det_res.x, det_res.y, det_res.z, det_res.yaw
+                obj_x, obj_y, obj_z, obj_yaw = (
+                    det_res.x,
+                    det_res.y,
+                    det_res.z,
+                    det_res.yaw,
+                )
                 self.get_logger().info(
                     f"  ✓ detected → base({obj_x:.3f},{obj_y:.3f},{obj_z:.3f}, yaw={math.degrees(obj_yaw):.1f})"
                 )
                 self._assert_not_cancelled()
 
                 # -------- 3. 移到预抓取位 --------
-                place_x, place_y, place_z = obj_x, obj_y, obj_z + 0.25
+                place_x, place_y, place_z = (
+                    obj_x,
+                    obj_y,
+                    obj_z + self.PRE_GRASP_OFFSET,
+                )
                 self.get_logger().info(
                     f"[3/11] ik_abs x={place_x:.4f} y={place_y:.4f} z={place_z:.4f} "
                     f"roll=180.0 pitch=0.0 yaw={math.degrees(obj_yaw):.1f}"
                 )
                 self._publish_feedback(goal_handle, 3, "Moving to pre-grasp...")
-                self._plan_ik_abs(place_x, place_y, place_z, 180.0, 0.0, math.degrees(obj_yaw))
+                self._plan_ik_abs(
+                    place_x, place_y, place_z, 180.0, 0.0, math.degrees(obj_yaw)
+                )
                 self._assert_not_cancelled()
 
                 # -------- 4. 垂直下降 --------
-                move_rel_z = 0.075
+                # Both backends use the same tool0/TCP reference.
+                move_rel_z = self.GRASP_DESCENT
                 self.get_logger().info(f"[4/11] ik_rel dz={-move_rel_z:.3f}")
                 self._publish_feedback(goal_handle, 4, "Descending to grasp...")
                 self._plan_ik_rel(0, 0, -move_rel_z, 0, 0, 0)
                 self._assert_not_cancelled()
 
                 # -------- 5. 闭合夹爪 --------
-                self.get_logger().info("[5/11] gripper pos=0.6")
+                self.get_logger().info("[5/11] gripper pos=0.8")
                 self._publish_feedback(goal_handle, 5, "Closing gripper...")
-                self._plan_gripper(0.6)
+                self._plan_gripper(0.8)
                 self._assert_not_cancelled()
 
                 # -------- 6. 垂直抬升 --------
@@ -149,29 +175,33 @@ class OrchestratorNode(Node):
                 place_angle = math.degrees(math.atan2(place_y, place_x))
                 j1_place = -place_angle - 90
                 self.get_logger().info(f"[7/11] fk_rel dj1={j1_place:.1f}")
-                self._publish_feedback(goal_handle, 7, f"Rotating J1 to {j1_place:.1f}° for placement")
+                self._publish_feedback(
+                    goal_handle, 7, f"Rotating J1 to {j1_place:.1f}° for placement"
+                )
                 self._plan_fk_rel(j1_place, 0, 0, 0, 0, 0)
                 self._assert_not_cancelled()
 
                 # raise RuntimeError("Cancelled by user")
 
-                # -------- 8. 移到放置托盘上方 --------
-                self.get_logger().info(f"[8/11] ik_rel dz={-move_rel_z:.3f}")
-                self._publish_feedback(goal_handle, 8, "Moving above placement tray...")
-                self._plan_ik_rel(0, 0, -move_rel_z, 0, 0, 0)
-                self._assert_not_cancelled()
+                # -------- 8. 垂直下降放置 --------
+                # self.get_logger().info(f"[8/11] ik_rel dz={-move_rel_z:.3f}")
+                # self._publish_feedback(goal_handle, 8, "Moving above placement tray...")
+                # self._plan_ik_rel(0, 0, -move_rel_z, 0, 0, 0)
+                # self._assert_not_cancelled()
 
-                # -------- 9. 垂直下降放置 --------
+                # -------- 9. 松开夹爪 --------
                 self.get_logger().info("[9/11] gripper pos=0")
-                self._publish_feedback(goal_handle, 9, "Descending to place...")
+                self._publish_feedback(goal_handle, 9, "Opening gripper...")
                 self._plan_gripper(0)
                 self._assert_not_cancelled()
-
-                # -------- 10. 松开夹爪 --------
-                self.get_logger().info(f"[10/11] ik_rel dz={move_rel_z:.3f}")
-                self._publish_feedback(goal_handle, 10, "Opening gripper...")
-                self._plan_ik_rel(0, 0, move_rel_z, 0, 0, 0)
+                self._sleep(self.PLACE_SETTLE_SECONDS)
                 self._assert_not_cancelled()
+
+                # -------- 10. 抬升 --------
+                # self.get_logger().info(f"[10/11] ik_rel dz={move_rel_z:.3f}")
+                # self._publish_feedback(goal_handle, 10, "Retreating from placement tray...")
+                # self._plan_ik_rel(0, 0, move_rel_z, 0, 0, 0)
+                # self._assert_not_cancelled()
 
                 # -------- 11. 抬升并回原点 --------
                 self.get_logger().info("[11/11] fk_abs home (0 -90 90 0 90 0)")
@@ -250,7 +280,9 @@ class OrchestratorNode(Node):
     def _plan(self, req):
         res = self._call(self._plan_cli, req, timeout=20.0)
         if not res or not res.success:
-            raise RuntimeError(f"Plan/execute failed: {res.message if res else 'timeout'}")
+            raise RuntimeError(
+                f"Plan/execute failed: {res.message if res else 'timeout'}"
+            )
         self._sleep(1.0)
         self.get_logger().info(f"  ✓ {res.message}")
 
@@ -262,6 +294,8 @@ class OrchestratorNode(Node):
         future = cli.call_async(req)
         start = time.time()
         while not future.done() and time.time() - start < timeout:
+            if self._cancel_requested:
+                return None
             time.sleep(0.01)
         if future.done():
             return future.result()

@@ -62,6 +62,7 @@ def launch_setup(context, *args, **kwargs):
     prefix = LaunchConfiguration("prefix")
     use_sim_time = LaunchConfiguration("use_sim_time")
     launch_rviz = LaunchConfiguration("launch_rviz")
+    launch_robot_state_publisher = LaunchConfiguration("launch_robot_state_publisher")
     robot_ip = LaunchConfiguration("robot_ip")
     use_fake_hardware = LaunchConfiguration("use_fake_hardware")
     use_gripper = LaunchConfiguration("use_gripper")
@@ -121,7 +122,7 @@ def launch_setup(context, *args, **kwargs):
             " ",
             "output_recipe_filename:=rtde_output_recipe.txt",
             " ",
-            "prefix:=",
+            "tf_prefix:=",
             prefix,
             " ",
             "use_fake_hardware:=",
@@ -242,6 +243,7 @@ def launch_setup(context, *args, **kwargs):
     robot_state_publisher_node = Node(
         package="robot_state_publisher",
         executable="robot_state_publisher",
+        condition=IfCondition(launch_robot_state_publisher),
         parameters=[
             robot_description,
             {"use_sim_time": use_sim_time},
@@ -377,6 +379,13 @@ def generate_launch_description():
     )
     declared_arguments.append(
         DeclareLaunchArgument("launch_rviz", default_value="true", description="Launch RViz?")
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "launch_robot_state_publisher",
+            default_value="true",
+            description="Launch robot_state_publisher from the MoveIt launch file.",
+        )
     )
     declared_arguments.append(
         DeclareLaunchArgument(
