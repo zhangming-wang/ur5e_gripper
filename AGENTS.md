@@ -48,8 +48,9 @@ source install/setup.bash
 - **`/pick_and_place`** — `custom_msgs/action/PickAndPlace` (11-step pipeline, driven by `orchestrator_node`).
 - **`/spawn_cube`** and **`/reset`** — use `std_srvs/srv/Trigger` (not `custom_msgs/srv/SpawnCube`, which exists but is unused). Served by IsaacLab `control_node` in sim mode and by the MuJoCo `mujoco_scene_plugin` in MuJoCo mode.
 - **Bridge ↔ Control topic pairs** (must stay in sync):
-  - Arm: `/arm_controller/joint_trajectory` ↔ `/isaaclab/trajectory_done`
-  - Gripper: `/gripper_controller/command` ↔ `/isaaclab/gripper_done`
+  - Arm: `/arm_controller/joint_trajectory` ↔ `/isaaclab/trajectory_done` (`Bool`)
+  - Gripper: `/gripper_controller/command` (`Float64`) ↔ `/isaaclab/gripper_done` (`UInt8`: `0`=failed, `1`=reached, `2`=stalled/contact). `bridge_node` maps `2` to `GripperCommand.Result(stalled=True, reached_goal=False)` and still succeeds the action.
+  - Isaac execution uses **simulation time** for trajectory interpolation, settle, and contact debounce. `control_node` publishes `/isaaclab/sim_time`; `bridge_node` accepts slow but progressing simulation and uses wall time only for no-progress and bounded-safety watchdogs.
 - **Stop topic**: `/stop_motion` is the shared stop signal; `/isaaclab/stop_motion` remains a legacy IsaacLab-compatible topic.
 - **Perception** defaults to `env_0` and subscribes to `/{env_prefix}/gemini2/rgb` and `/{env_prefix}/gemini2/depth`. Gemini2 intrinsics (`FX/FY=686.3`, `CX=640`, `CY=360`) and camera→base transform (`[0, 0.5, 0.8]`) are ROS params (defaults in `perception_node.py`, shared `src/perception/config/perception.yaml` for both modes) — changing the scene layout breaks detection.
 - `run.sh` is the source of truth for process ordering and backend selection; keep it synchronized with package manifests.
@@ -57,6 +58,7 @@ source install/setup.bash
 ## Backend control paths
 
 - **IsaacLab**: `planning_node` → `bridge_node` (action server, at `isaaclab/src/bridge_node.py`) → topics → `control_node` (sim). `bridge_node` provides `/joint_trajectory_controller/follow_joint_trajectory` and `/robotiq_gripper_controller/gripper_cmd` actions.
+- **Isaac gripper asset**: runtime currently uses tracked `isaaclab/urdf/ur5e_with_gripper/` and mirrors all six gripper targets because that asset has no PhysX mimics. `isaaclab/urdf/ur5e_with_gripper_mimic/` is a generated candidate only; do not adopt it until `python isaaclab/tools/convert_ur5e_with_gripper.py --headless --force` validates all five reference joints, finite limits, and no dependent drives.
 - **MuJoCo**: `planning_node` → `mujoco_ros2_control/ros2_control_node` (plugin). Same action endpoints, served directly by `controller_manager`. No bridge needed. The `mujoco` package also builds a C++ `mujoco_scene_plugin` (extends `mujoco_ros2_control`) that serves `/spawn_cube` and `/reset`, and resets the freejoint cube.
 - MuJoCo mode depends on system ROS apt packages: `ros-humble-mujoco-ros2-control`, `ros-humble-mujoco-vendor`, `ros-humble-mujoco-ros2-control-plugins`.
 - The MuJoCo MJCF must keep actuator names synced with the ros2_control joint list in `mujoco/urdf/`. The gripper uses a tendon-based position actuator named `robotiq_85_left_knuckle_joint` (matching the URDF/MoveIt joint), driven by `robotiq_gripper_controller` (`GripperActionController`).

@@ -49,6 +49,8 @@ class OrchestratorNode(Node):
         self._goal_active = False
         self._goal_lock = threading.Lock()
         self._stop_motion_pub = self.create_publisher(Bool, "/stop_motion", 10)
+        self.declare_parameter("plan_timeout_sec", 20.0)
+        self._plan_timeout_sec = float(self.get_parameter("plan_timeout_sec").value)
 
         # Action Server
         self._action_server = ActionServer(
@@ -278,8 +280,10 @@ class OrchestratorNode(Node):
         self._plan_fk_abs(0.0, -90.0, 90.0, 0.0, 90.0, 0.0)
 
     def _plan(self, req):
-        res = self._call(self._plan_cli, req, timeout=20.0)
+        res = self._call(self._plan_cli, req, timeout=self._plan_timeout_sec)
         if not res or not res.success:
+            if not res:
+                self._stop_motion_pub.publish(Bool(data=True))
             raise RuntimeError(
                 f"Plan/execute failed: {res.message if res else 'timeout'}"
             )

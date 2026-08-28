@@ -173,7 +173,8 @@ if [ "$MODE" = "isaacsim" ]; then
     start_job "
         source /opt/ros/humble/setup.bash
         source '$INSTALL_DIR/setup.bash'
-        ros2 run orchestrator orchestrator_node --ros-args -p use_sim_time:=$USE_SIM_TIME
+        ros2 run orchestrator orchestrator_node --ros-args \
+            -p use_sim_time:=$USE_SIM_TIME -p plan_timeout_sec:=60.0
     "
 
     # ---- 面板 ----

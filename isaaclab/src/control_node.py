@@ -7,11 +7,25 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64, Bool
+from std_msgs.msg import Float64, Bool, UInt8
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory
 import carb
 import omni.appwindow
+
+# 夹爪完成结果码（与 bridge_node 保持一致）
+GRIPPER_FAILED = 0
+GRIPPER_REACHED = 1
+GRIPPER_STALLED = 2
+GRIPPER_MASTER_JOINT = "robotiq_85_left_knuckle_joint"
+GRIPPER_JOINTS = [
+    "robotiq_85_left_knuckle_joint",
+    "robotiq_85_right_knuckle_joint",
+    "robotiq_85_left_inner_knuckle_joint",
+    "robotiq_85_right_inner_knuckle_joint",
+    "robotiq_85_left_finger_tip_joint",
+    "robotiq_85_right_finger_tip_joint",
+]
 
 
 class ControlNode(Node):
@@ -25,8 +39,14 @@ class ControlNode(Node):
 
         # 初始关节角度 (rad)，run_isaaclab 启动后会覆盖为仿真实际值
         self.current_pos = np.zeros(self.num_joints, dtype=np.float64)
+        self.current_vel = np.zeros(self.num_joints, dtype=np.float64)
+        self.applied_torque = np.zeros(self.num_joints, dtype=np.float64)
+        self.effort_limits = np.ones(self.num_joints, dtype=np.float64)
         self.target_pos = np.zeros(self.num_joints, dtype=np.float64)
         self.init_pos = np.zeros(self.num_joints, dtype=np.float64)
+        # 指尖接触力 (N)，由 run_isaaclab 每物理帧通过 ContactSensor 更新
+        self.gripper_contact_left = 0.0
+        self.gripper_contact_right = 0.0
         # 安全默认值（通过关节名设置，不依赖索引）
         for name, val in [
             ("shoulder_lift_joint", -1.57),
@@ -51,18 +71,36 @@ class ControlNode(Node):
         # 夹爪
         self._gripper_target = 0.0
         self._gripper_done_sent = True
-        self._gripper_stable_cnt = 0
-        self._gripper_prev_pos = None
         self._gripper_start_time = 0.0
+        self._gripper_contact_cnt = 0
         self._motion_stopped = False
 
         qos = rclpy.qos.QoSProfile(depth=10, reliability=rclpy.qos.ReliabilityPolicy.RELIABLE)
 
+        # 到位判定参数（可被 ros2 run --ros-args -p 覆盖）
+        self.declare_parameter("arm_goal_tolerance", 0.005)
+        self.declare_parameter("arm_stable_threshold", 1e-4)
+        self.declare_parameter("arm_stable_samples", 3)
+        self.declare_parameter("arm_settle_timeout", 5.0)
+        self.declare_parameter("gripper_goal_tolerance", 0.01)
+        self.declare_parameter("gripper_contact_force_threshold_n", 1.0)
+        self.declare_parameter("gripper_contact_samples", 5)
+        self.declare_parameter("gripper_settle_timeout", 5.0)
+        self._arm_goal_tolerance = float(self.get_parameter("arm_goal_tolerance").value)
+        self._arm_stable_threshold = float(self.get_parameter("arm_stable_threshold").value)
+        self._arm_stable_samples = int(self.get_parameter("arm_stable_samples").value)
+        self._arm_settle_timeout = float(self.get_parameter("arm_settle_timeout").value)
+        self._gripper_goal_tolerance = float(self.get_parameter("gripper_goal_tolerance").value)
+        self._gripper_contact_force_threshold_n = float(self.get_parameter("gripper_contact_force_threshold_n").value)
+        self._gripper_contact_samples = int(self.get_parameter("gripper_contact_samples").value)
+        self._gripper_settle_timeout = float(self.get_parameter("gripper_settle_timeout").value)
+
         # Pub: 物理状态
         self.joint_state_pub = self.create_publisher(JointState, "/joint_states", qos)
+        self._sim_time_pub = self.create_publisher(Float64, "/isaaclab/sim_time", qos)
         # Pub: 执行完成信号
         self._traj_done_pub = self.create_publisher(Bool, "/isaaclab/trajectory_done", qos)
-        self._gripper_done_pub = self.create_publisher(Bool, "/isaaclab/gripper_done", qos)
+        self._gripper_done_pub = self.create_publisher(UInt8, "/isaaclab/gripper_done", qos)
 
         # Sub: 桥接节点发的指令
         self.create_subscription(JointTrajectory, "/arm_controller/joint_trajectory", self._arm_traj_callback, qos)
@@ -90,6 +128,10 @@ class ControlNode(Node):
         msg.header.stamp = t
         msg.name = self.joint_name_list
         msg.position = self.current_pos.tolist()
+        if self.current_vel is not None:
+            msg.velocity = self.current_vel.tolist()
+        if self.applied_torque is not None:
+            msg.effort = self.applied_torque.tolist()
         self.joint_state_pub.publish(msg)
 
     # ------------------------------------------------------------------
@@ -129,6 +171,8 @@ class ControlNode(Node):
                 return
             previous_t = t
             self._traj_points.append((pos, t))
+        if self._traj_points[0][1] > 0.0:
+            self._traj_points.insert(0, (np.array(self.current_pos), 0.0))
         self._traj_start_time = self._sim_time
         self._traj_active = True
         self.get_logger().info(f"Trajectory: {len(msg.points)} pts, " f"duration={self._traj_points[-1][1]:.1f}s")
@@ -164,8 +208,8 @@ class ControlNode(Node):
             self._traj_prev_pos = None
             return
 
-        # 稳定检测：所有被命令关节连续3帧稳定，或超时5秒。
-        if self._sim_time - self._traj_settle_start > 5.0:
+        # 稳定检测：所有被命令关节连续 N 帧稳定，或超时。
+        if self._sim_time - self._traj_settle_start > self._arm_settle_timeout:
             self.get_logger().error("Arm settle timeout")
             self._finish_traj(False)
             return
@@ -183,9 +227,9 @@ class ControlNode(Node):
         if not current.size:
             self._finish_traj(False)
             return
-        if self._traj_prev_pos is not None and np.max(np.abs(current - self._traj_prev_pos)) < 1e-4:
+        if self._traj_prev_pos is not None and np.max(np.abs(current - self._traj_prev_pos)) < self._arm_stable_threshold:
             self._traj_stable_cnt += 1
-            if self._traj_stable_cnt >= 3 and np.max(np.abs(current - target)) < 1e-3:
+            if self._traj_stable_cnt >= self._arm_stable_samples and np.max(np.abs(current - target)) < self._arm_goal_tolerance:
                 self._finish_traj(True)
                 return
         else:
@@ -215,60 +259,87 @@ class ControlNode(Node):
     # ------------------------------------------------------------------
 
     def step_gripper(self):
-        """每物理帧调用，设夹爪目标 + 稳定后发完成信号。"""
+        """每物理帧调用，设夹爪目标，按到位/接触判定完成。
+
+        仅以 robotiq_85_left_knuckle_joint 作为逻辑夹爪关节：
+        - 到达目标容差内 → REACHED
+        - 闭合时左右指尖接触力都超过阈值并持续数个物理帧 → STALLED（夹住物体）
+        - 超时/停止/遥测无效 → FAILED
+        """
         if self._motion_stopped:
             return
         if self._gripper_done_sent:
             return
-        all_gripper = [
-            "robotiq_85_left_knuckle_joint",
-            "robotiq_85_right_knuckle_joint",
-            "robotiq_85_left_inner_knuckle_joint",
-            "robotiq_85_right_inner_knuckle_joint",
-            "robotiq_85_left_finger_tip_joint",
-            "robotiq_85_right_finger_tip_joint",
-        ]
-        # 左右镜像：knuckle+inner 左正右负，finger_tip 反过来
-        for jname in all_gripper:
-            if jname in self.name_to_idx:
-                if "tip" in jname:
-                    v = self._gripper_target if "right" in jname else -self._gripper_target
-                else:
-                    v = -self._gripper_target if "right" in jname else self._gripper_target
-                self.target_pos[self.name_to_idx[jname]] = v
-
-        current = np.array([
-            self.current_pos[self.name_to_idx[name]]
-            for name in all_gripper
-            if name in self.name_to_idx
-        ])
-        if not current.size:
+        if GRIPPER_MASTER_JOINT not in self.name_to_idx:
             self.get_logger().error("No gripper joints are available")
-            self._gripper_done_pub.publish(Bool(data=False))
-            self._gripper_done_sent = True
+            self._finish_gripper(GRIPPER_FAILED, "no gripper joint")
             return
-        if self._sim_time - self._gripper_start_time > 5.0:
-            self.get_logger().error("Gripper settle timeout")
-            self._gripper_done_pub.publish(Bool(data=False))
-            self._gripper_done_sent = True
+        idx = self.name_to_idx[GRIPPER_MASTER_JOINT]
+        # The fallback USD has no physical mimic constraints, so mirror the
+        # master target across the six independent joint drives.
+        for name in GRIPPER_JOINTS:
+            if name not in self.name_to_idx:
+                continue
+            if "tip" in name:
+                value = self._gripper_target if "right" in name else -self._gripper_target
+            else:
+                value = -self._gripper_target if "right" in name else self._gripper_target
+            self.target_pos[self.name_to_idx[name]] = value
+
+        current = float(self.current_pos[idx])
+        target = float(self.target_pos[idx])
+
+        error = abs(current - target)
+
+        # 双指接触力检测：接触优先于位置到达，这样小物体也会被报告为 grasp。
+        closing = self._gripper_target > 0.0
+        contact_ok = (
+            closing
+            and self.gripper_contact_left >= self._gripper_contact_force_threshold_n
+            and self.gripper_contact_right >= self._gripper_contact_force_threshold_n
+        )
+        if contact_ok:
+            self._gripper_contact_cnt += 1
+            if self._gripper_contact_cnt >= self._gripper_contact_samples:
+                self._finish_gripper(
+                    GRIPPER_STALLED,
+                    f"contact pos={current:.4f} "
+                    f"F_left={self.gripper_contact_left:.2f}N "
+                    f"F_right={self.gripper_contact_right:.2f}N",
+                )
+                return
+        else:
+            self._gripper_contact_cnt = 0
+
+        # 空载闭合或打开时仍按位置报告成功。
+        if error <= self._gripper_goal_tolerance:
+            self._finish_gripper(GRIPPER_REACHED, f"reached pos={current:.4f}")
             return
 
-        if self._gripper_prev_pos is not None and np.max(np.abs(current - self._gripper_prev_pos)) < 1e-5:
-            self._gripper_stable_cnt += 1
-            if self._gripper_stable_cnt >= 3 and not self._gripper_done_sent:
-                self._gripper_done_pub.publish(Bool(data=True))
-                self._gripper_done_sent = True
-                self.get_logger().info("Gripper done")
-        else:
-            self._gripper_stable_cnt = 0
-        self._gripper_prev_pos = current
+        # 超时（带诊断）
+        if self._sim_time - self._gripper_start_time > self._gripper_settle_timeout:
+            self._finish_gripper(
+                GRIPPER_FAILED,
+                f"settle timeout pos={current:.4f} "
+                f"F_left={self.gripper_contact_left:.2f}N "
+                f"F_right={self.gripper_contact_right:.2f}N "
+                f"contact_cnt={self._gripper_contact_cnt}/{self._gripper_contact_samples}",
+            )
+            return
+
+    def _finish_gripper(self, code, note=""):
+        if self._gripper_done_sent:
+            return
+        self._gripper_done_sent = True
+        label = {GRIPPER_FAILED: "failed", GRIPPER_REACHED: "reached", GRIPPER_STALLED: "stalled"}[code]
+        self.get_logger().info(f"Gripper {label} ({note})")
+        self._gripper_done_pub.publish(UInt8(data=code))
 
     def _gripper_callback(self, msg: Float64):
         self._motion_stopped = False
         self._gripper_target = msg.data
         self._gripper_done_sent = False
-        self._gripper_stable_cnt = 0
-        self._gripper_prev_pos = None
+        self._gripper_contact_cnt = 0
         self._gripper_start_time = self._sim_time
 
     def _stop_motion_callback(self, msg: Bool):
@@ -284,19 +355,19 @@ class ControlNode(Node):
         self._last_traj_joint_names = []
         self.target_pos = self.current_pos.copy()
         self._gripper_done_sent = True
-        self._gripper_stable_cnt = 0
-        self._gripper_prev_pos = None
+        self._gripper_contact_cnt = 0
         self._gripper_target = float(
-            self.current_pos[self.name_to_idx["robotiq_85_left_knuckle_joint"]]
-        ) if "robotiq_85_left_knuckle_joint" in self.name_to_idx else 0.0
+            self.current_pos[self.name_to_idx[GRIPPER_MASTER_JOINT]]
+        ) if GRIPPER_MASTER_JOINT in self.name_to_idx else 0.0
         if arm_was_active:
             self._traj_done_pub.publish(Bool(data=False))
         if gripper_was_active:
-            self._gripper_done_pub.publish(Bool(data=False))
+            self._gripper_done_pub.publish(UInt8(data=GRIPPER_FAILED))
         self.get_logger().warn("Motion stopped")
 
     def advance_sim_time(self, dt):
         self._sim_time += float(dt)
+        self._sim_time_pub.publish(Float64(data=self._sim_time))
 
     # ------------------------------------------------------------------
     # 重置

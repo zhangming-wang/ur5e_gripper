@@ -47,7 +47,7 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.assets.articulation import ArticulationCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
-from isaaclab.sensors import Camera, CameraCfg
+from isaaclab.sensors import Camera, CameraCfg, ContactSensor, ContactSensorCfg
 from isaaclab.utils import configclass
 
 from control_node import ControlNode
@@ -163,6 +163,7 @@ class SceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/ur5e",
         spawn=sim_utils.UsdFileCfg(
             usd_path=str(_robot_usd_path),
+            activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
             ),
@@ -194,17 +195,19 @@ class SceneCfg(InteractiveSceneCfg):
                     "wrist_3_joint": 300.0,
                 },
                 velocity_limit_sim={
-                    "shoulder_pan_joint": 3.14,
-                    "shoulder_lift_joint": 3.14,
-                    "elbow_joint": 3.14,
-                    "wrist_1_joint": 3.14,
-                    "wrist_2_joint": 3.14,
-                    "wrist_3_joint": 3.14,
+                    "shoulder_pan_joint": 6.28,
+                    "shoulder_lift_joint": 6.28,
+                    "elbow_joint": 6.28,
+                    "wrist_1_joint": 6.28,
+                    "wrist_2_joint": 6.28,
+                    "wrist_3_joint": 6.28,
                 },
                 stiffness=10000.0,
                 damping=400.0,
             ),
             "ur5e_gripper": ImplicitActuatorCfg(
+                # The tracked fallback USD has six independent Robotiq joints.
+                # Keep these targets synchronized until a verified mimic USD is adopted.
                 joint_names_expr=[
                     "robotiq_85_left_knuckle_joint",
                     "robotiq_85_right_knuckle_joint",
@@ -213,10 +216,10 @@ class SceneCfg(InteractiveSceneCfg):
                     "robotiq_85_left_finger_tip_joint",
                     "robotiq_85_right_finger_tip_joint",
                 ],
-                effort_limit_sim=50.0,
-                velocity_limit_sim=2.0,
-                stiffness=500.0,
-                damping=20.0,
+                effort_limit_sim=6.0,
+                velocity_limit_sim=3.0,
+                stiffness=20.0,
+                damping=1.0,
             ),
         },
     )
@@ -277,12 +280,16 @@ class MainLoop:
 
         self._init_robot()
         self._setup_gemini2_cameras()
+        self._setup_gripper_contact_sensors()
 
     def exec(self):
         print("[INFO] Simulation running. Press Ctrl+C to stop.")
 
         while simulation_app.is_running():
             self.control_node.current_pos = self.ur5e.data.joint_pos[0].cpu().numpy()
+            self.control_node.current_vel = self.ur5e.data.joint_vel[0].cpu().numpy()
+            self.control_node.applied_torque = self.ur5e.data.applied_torque[0].cpu().numpy()
+            self.control_node.effort_limits = self.ur5e.data.joint_effort_limits[0].cpu().numpy()
             self.ros_executor.spin_once(timeout_sec=0.001)
 
             self.control_node.step_traj()
@@ -294,12 +301,60 @@ class MainLoop:
             self.ur5e.set_joint_position_target(target)
 
             self.scene.write_data_to_sim()
+            self.sim.step()
             self.scene.update(self.sim_dt)
             for cam in self.gemini2_cameras:
                 cam.update(self.sim_dt)
 
-            self.sim.step()
+            self._update_gripper_contact(self.sim_dt)
             self.control_node.advance_sim_time(self.sim_dt)
+
+    def _setup_gripper_contact_sensors(self):
+        """在左右指尖上创建接触传感器，读取 PhysX 接触法向力。"""
+        self.contact_sensor_left = None
+        self.contact_sensor_right = None
+        try:
+            self.contact_sensor_left = ContactSensor(
+                ContactSensorCfg(
+                    prim_path="/World/envs/env_0/ur5e/robotiq_85_left_finger_tip_link",
+                    update_period=0.0,
+                    history_length=0,
+                )
+            )
+            self.contact_sensor_left._initialize_impl()
+        except Exception as e:
+            print(f"[ERROR] Failed to init left finger contact sensor: {e}", file=sys.stderr)
+
+        try:
+            self.contact_sensor_right = ContactSensor(
+                ContactSensorCfg(
+                    prim_path="/World/envs/env_0/ur5e/robotiq_85_right_finger_tip_link",
+                    update_period=0.0,
+                    history_length=0,
+                )
+            )
+            self.contact_sensor_right._initialize_impl()
+        except Exception as e:
+            print(f"[ERROR] Failed to init right finger contact sensor: {e}", file=sys.stderr)
+
+    def _update_gripper_contact(self, dt):
+        """读取左右指尖接触法向力并写入 control_node。"""
+        left = 0.0
+        right = 0.0
+        try:
+            if self.contact_sensor_left is not None:
+                self.contact_sensor_left.update(dt)
+                left = float(torch.norm(self.contact_sensor_left.data.net_forces_w[0, 0]).item())
+        except Exception as e:
+            print(f"[ERROR] Left finger contact read failed: {e}", file=sys.stderr)
+        try:
+            if self.contact_sensor_right is not None:
+                self.contact_sensor_right.update(dt)
+                right = float(torch.norm(self.contact_sensor_right.data.net_forces_w[0, 0]).item())
+        except Exception as e:
+            print(f"[ERROR] Right finger contact read failed: {e}", file=sys.stderr)
+        self.control_node.gripper_contact_left = left
+        self.control_node.gripper_contact_right = right
 
     def _init_robot(self):
         p = self.control_node.init_pos.copy()
@@ -411,9 +466,7 @@ class MainLoop:
             if not cam_prim.IsValid():
                 print(f"[WARN] RGB camera prim not found: {rgb_path}")
                 continue
-            cam_mat = UsdGeom.Xformable(cam_prim).ComputeLocalToWorldTransform(
-                Usd.TimeCode.Default()
-            )
+            cam_mat = UsdGeom.Xformable(cam_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
             base_mat = UsdGeom.Xformable(stage.GetPrimAtPath(f"{env_path}/ur5e")).ComputeLocalToWorldTransform(
                 Usd.TimeCode.Default()
             )
