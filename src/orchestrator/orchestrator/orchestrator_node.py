@@ -95,9 +95,7 @@ class OrchestratorNode(Node):
                 # -------- 0. 清除旧方块 --------
                 reset_res = self._call(self._reset_cli, Trigger.Request(), timeout=5.0)
                 if not reset_res or not reset_res.success:
-                    raise RuntimeError(
-                        f"Reset failed: {reset_res.message if reset_res else 'timeout'}"
-                    )
+                    raise RuntimeError(f"Reset failed: {reset_res.message if reset_res else 'timeout'}")
                 self._sleep(1.0)
                 self._assert_not_cancelled()
 
@@ -107,16 +105,12 @@ class OrchestratorNode(Node):
                 self._publish_feedback(goal_handle, 1, "Spawning cube...")
                 spawn_res = self._call(self._spawn_cli, Trigger.Request())
                 if not spawn_res or not spawn_res.success:
-                    raise RuntimeError(
-                        f"Spawn failed: {spawn_res.message if spawn_res else 'timeout'}"
-                    )
+                    raise RuntimeError(f"Spawn failed: {spawn_res.message if spawn_res else 'timeout'}")
                 self.get_logger().info("  ✓ cube spawned")
                 self._assert_not_cancelled()
 
                 # spawn service 只确认请求已接收；等待完整下落轨迹和图像刷新。
-                self.get_logger().info(
-                    f"Waiting {self.CUBE_SETTLE_SECONDS:.1f}s for cube to settle..."
-                )
+                self.get_logger().info(f"Waiting {self.CUBE_SETTLE_SECONDS:.1f}s for cube to settle...")
                 self._sleep(self.CUBE_SETTLE_SECONDS)
                 self._assert_not_cancelled()
 
@@ -148,9 +142,7 @@ class OrchestratorNode(Node):
                     f"roll=180.0 pitch=0.0 yaw={math.degrees(obj_yaw):.1f}"
                 )
                 self._publish_feedback(goal_handle, 3, "Moving to pre-grasp...")
-                self._plan_ik_abs(
-                    place_x, place_y, place_z, 180.0, 0.0, math.degrees(obj_yaw)
-                )
+                self._plan_ik_abs(place_x, place_y, place_z, 180.0, 0.0, math.degrees(obj_yaw))
                 self._assert_not_cancelled()
 
                 # -------- 4. 垂直下降 --------
@@ -177,9 +169,7 @@ class OrchestratorNode(Node):
                 place_angle = math.degrees(math.atan2(place_y, place_x))
                 j1_place = -place_angle - 90
                 self.get_logger().info(f"[7/11] fk_rel dj1={j1_place:.1f}")
-                self._publish_feedback(
-                    goal_handle, 7, f"Rotating J1 to {j1_place:.1f}° for placement"
-                )
+                self._publish_feedback(goal_handle, 7, f"Rotating J1 to {j1_place:.1f}° for placement")
                 self._plan_fk_rel(j1_place, 0, 0, 0, 0, 0)
                 self._assert_not_cancelled()
 
@@ -212,6 +202,7 @@ class OrchestratorNode(Node):
                 self._assert_not_cancelled()
 
                 self.get_logger().info(f"✅ Cycle {cycle} complete\n")
+                self._publish_feedback(goal_handle, 12, "finshed once cycled!")
                 succeeded = True
                 break
 
@@ -284,9 +275,7 @@ class OrchestratorNode(Node):
         if not res or not res.success:
             if not res:
                 self._stop_motion_pub.publish(Bool(data=True))
-            raise RuntimeError(
-                f"Plan/execute failed: {res.message if res else 'timeout'}"
-            )
+            raise RuntimeError(f"Plan/execute failed: {res.message if res else 'timeout'}")
         self._sleep(1.0)
         self.get_logger().info(f"  ✓ {res.message}")
 

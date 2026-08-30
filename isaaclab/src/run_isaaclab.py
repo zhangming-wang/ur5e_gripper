@@ -505,20 +505,6 @@ class MainLoop:
                 640,
                 400,
             ),
-            (
-                "camera_ir_left/camera_left/Stream_ir_left",
-                "rgb",
-                "gemini2/ir_left",
-                640,
-                400,
-            ),
-            (
-                "camera_ir_right/camera_right/Stream_ir_right",
-                "rgb",
-                "gemini2/ir_right",
-                640,
-                400,
-            ),
         ]
 
         self.gemini2_cameras = []

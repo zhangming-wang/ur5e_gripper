@@ -73,4 +73,11 @@ log/
 .claude/
 .vscode/
 __pycache__/
+
+# LeRobot raw recording data
+raw_data/
+raw_data_backup/
+lerobot_data/
+lerobot_data_rgb/
+outputs/
 MUJOCO_LOG.TXT

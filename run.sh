@@ -7,7 +7,8 @@ INSTALL_DIR="$PROJECT_DIR/install"
 CONDA_ROOT="${CONDA_ROOT:-/home/dev/miniconda3}"
 ISAACLAB_ENV="${ISAACLAB_ENV:-isaaclab}"
 
-export ROS_DOMAIN_ID=46
+# export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+# export ROS_DOMAIN_ID=46
 
 JOBS=""
 _cleaned=0
@@ -90,7 +91,7 @@ usage() {
 case "${1:-}" in
     --isaacsim) MODE="isaacsim" ;;
     --mujoco)   MODE="mujoco" ;;
-    "")         MODE="mujoco" ;;
+    "")         MODE="isaacsim" ;;
     *)          usage ;;
 esac
 
