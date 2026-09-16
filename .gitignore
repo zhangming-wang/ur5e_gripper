@@ -79,5 +79,6 @@ raw_data/
 raw_data_backup/
 lerobot_data/
 lerobot_data_rgb/
+lerobot_data_rgb_abs/
 outputs/
 MUJOCO_LOG.TXT

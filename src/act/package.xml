@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>act</name>
+  <version>1.0.0</version>
+  <description>ACT 端到端控制模式 — 策略执行器与 pick-and-place 编排</description>
+  <maintainer email="user@example.com">user</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>trajectory_msgs</exec_depend>
+  <exec_depend>custom_msgs</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

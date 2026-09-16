@@ -34,6 +34,7 @@ class RosClient(Node):
         super().__init__("gui_debug_panel")
         self.cli = self.create_client(PlanExecute, "/plan_execute")
         self.spawn_cli = self.create_client(Trigger, "/spawn_cube")
+        self.reset_cli = self.create_client(Trigger, "/reset")
         self.detect_cli = self.create_client(DetectObject, "/detect_object")
         self.pick_client = ActionClient(self, PickAndPlace, "/pick_and_place")
         self._pick_active = False
@@ -82,6 +83,15 @@ class RosClient(Node):
         rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
         res = future.result()
         return (res.success, res.message) if res else (False, "spawn service timeout")
+
+    def reset_sim(self):
+        """仿真复位：机械臂回 home 并删除方块（各后端通用）。"""
+        if not self.reset_cli.wait_for_service(timeout_sec=0.5):
+            return False, "/reset service not ready"
+        future = self.reset_cli.call_async(Trigger.Request())
+        rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
+        res = future.result()
+        return (res.success, res.message) if res else (False, "reset service timeout")
 
     def detect_cube(self):
         if not self.detect_cli.wait_for_service(timeout_sec=0.5):
@@ -563,10 +573,9 @@ class MainWindow(QMainWindow):
         self._send(f"发送关节: {joints}", self.ros.fk_abs, joints)
 
     def _on_reset(self):
-        defaults = [0, -90, 90, 0, 90, 0]
-        for slider, d in zip(self.joint_sliders, defaults):
-            slider.setValue(d)
-        self._on_arm_change()
+        """复位仿真（回 home + 删除方块），稍后同步滑块到实际状态。"""
+        self._send("复位", self.ros.reset_sim)
+        QTimer.singleShot(300, self._on_refresh)
 
     def _on_refresh(self):
         """从 /joint_states 同步当前关节角和夹爪到滑块"""

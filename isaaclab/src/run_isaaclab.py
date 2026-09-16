@@ -1,6 +1,7 @@
 """
 Launch Isaac Lab with the UR5e + Robotiq 2F-85 USD stage.
-IsaacLab hosts FollowJointTrajectory action server — MoveIt plans, IsaacLab executes.
+Normal mode hosts the FollowJointTrajectory execution path.  ACT mode accepts
+direct targets from the standalone ACT ROS adapter.
 """
 
 import argparse
@@ -15,6 +16,11 @@ import set_isaaclab_env
 # ----------------------------------------------------------------------
 parser = argparse.ArgumentParser(description="UR5e + Robotiq 2F-85 in Isaac Lab")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments")
+parser.add_argument(
+    "--act",
+    action="store_true",
+    help="Enable direct ACT control input instead of the MoveIt trajectory path",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True  # 必须启用，否则相机不渲染
@@ -275,7 +281,7 @@ class MainLoop:
         print(f"总关节数: {num_joints}\n")
 
         self.ros_executor = SingleThreadedExecutor()
-        self.control_node = ControlNode(self, joint_names)
+        self.control_node = ControlNode(self, joint_names, act_mode=args_cli.act)
         self.ros_executor.add_node(self.control_node)
 
         self._init_robot()
@@ -292,8 +298,11 @@ class MainLoop:
             self.control_node.effort_limits = self.ur5e.data.joint_effort_limits[0].cpu().numpy()
             self.ros_executor.spin_once(timeout_sec=0.001)
 
-            self.control_node.step_traj()
-            self.control_node.step_gripper()
+            if args_cli.act:
+                self.control_node.step_act()
+            else:
+                self.control_node.step_traj()
+                self.control_node.step_gripper()
 
             self.control_node.publish_joint_state()
 

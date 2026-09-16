@@ -26,13 +26,24 @@ GRIPPER_JOINTS = [
     "robotiq_85_left_finger_tip_joint",
     "robotiq_85_right_finger_tip_joint",
 ]
+ACT_ARM_JOINTS = [
+    "shoulder_pan_joint",
+    "shoulder_lift_joint",
+    "elbow_joint",
+    "wrist_1_joint",
+    "wrist_2_joint",
+    "wrist_3_joint",
+]
+ACT_COMMAND_TOPIC = "/isaaclab/act/joint_target"
+ACT_ENABLED_TOPIC = "/isaaclab/act/enabled"
 
 
 class ControlNode(Node):
-    def __init__(self, isaaclab, joint_name_list):
+    def __init__(self, isaaclab, joint_name_list, act_mode=False):
         super().__init__("ur5e_control_node")
 
         self.isaaclab = isaaclab
+        self._act_mode = bool(act_mode)
         self.joint_name_list = list(joint_name_list)
         self.num_joints = len(self.joint_name_list)
         self.name_to_idx = {name: i for i, name in enumerate(self.joint_name_list)}
@@ -75,6 +86,19 @@ class ControlNode(Node):
         self._gripper_contact_cnt = 0
         self._motion_stopped = False
 
+        # ACT direct-control state.  This path is intentionally separate from
+        # the MoveIt trajectory state machine above.
+        self._act_enabled = False
+        self._act_target = self.target_pos.copy()
+        self._act_start_target = self.target_pos.copy()
+        self._act_command_start_time = 0.0
+        self._act_last_command_time = float("-inf")
+        self._act_gripper_start = 0.0
+        self._act_gripper_target = 0.0
+        self._act_stale_reported = False
+        self._act_clamp_count = 0
+        self._act_command_count = 0
+
         qos = rclpy.qos.QoSProfile(depth=10, reliability=rclpy.qos.ReliabilityPolicy.RELIABLE)
 
         # 到位判定参数（可被 ros2 run --ros-args -p 覆盖）
@@ -95,6 +119,15 @@ class ControlNode(Node):
         self._gripper_contact_samples = int(self.get_parameter("gripper_contact_samples").value)
         self._gripper_settle_timeout = float(self.get_parameter("gripper_settle_timeout").value)
 
+        self.declare_parameter("act_watchdog_sec", 0.5)
+        self.declare_parameter("act_command_period", 1.0 / 15.0)
+        self.declare_parameter("act_max_joint_step", 0.15)
+        self._act_watchdog_sec = float(self.get_parameter("act_watchdog_sec").value)
+        self._act_command_period = float(self.get_parameter("act_command_period").value)
+        self._act_max_joint_step = float(self.get_parameter("act_max_joint_step").value)
+        if self._act_watchdog_sec <= 0 or self._act_command_period <= 0 or self._act_max_joint_step <= 0:
+            raise ValueError("ACT watchdog, command period, and max joint step must be positive")
+
         # Pub: 物理状态
         self.joint_state_pub = self.create_publisher(JointState, "/joint_states", qos)
         self._sim_time_pub = self.create_publisher(Float64, "/isaaclab/sim_time", qos)
@@ -102,9 +135,15 @@ class ControlNode(Node):
         self._traj_done_pub = self.create_publisher(Bool, "/isaaclab/trajectory_done", qos)
         self._gripper_done_pub = self.create_publisher(UInt8, "/isaaclab/gripper_done", qos)
 
-        # Sub: 桥接节点发的指令
-        self.create_subscription(JointTrajectory, "/arm_controller/joint_trajectory", self._arm_traj_callback, qos)
-        self.create_subscription(Float64, "/gripper_controller/command", self._gripper_callback, qos)
+        # Sub: ordinary bridge commands, or the isolated ACT command path.
+        if self._act_mode:
+            self.create_subscription(JointTrajectory, ACT_COMMAND_TOPIC, self._act_callback, qos)
+            self.create_subscription(Bool, ACT_ENABLED_TOPIC, self._act_enabled_callback, qos)
+        else:
+            self.create_subscription(
+                JointTrajectory, "/arm_controller/joint_trajectory", self._arm_traj_callback, qos
+            )
+            self.create_subscription(Float64, "/gripper_controller/command", self._gripper_callback, qos)
         self.create_subscription(Bool, "/stop_motion", self._stop_motion_callback, qos)
         self.create_subscription(Bool, "/isaaclab/stop_motion", self._stop_motion_callback, qos)
 
@@ -138,7 +177,146 @@ class ControlNode(Node):
     # 轨迹
     # ------------------------------------------------------------------
 
+    def _act_enabled_callback(self, msg: Bool):
+        enabled = bool(msg.data)
+        if enabled:
+            if not self._act_enabled:
+                self._motion_stopped = False
+                self._act_enabled = True
+                self._act_target = self.current_pos.copy()
+                self._act_start_target = self.current_pos.copy()
+                self._act_gripper_start = float(
+                    self.current_pos[self.name_to_idx[GRIPPER_MASTER_JOINT]]
+                ) if GRIPPER_MASTER_JOINT in self.name_to_idx else 0.0
+                self._act_gripper_target = self._act_gripper_start
+                self._act_command_start_time = self._sim_time
+                self._act_last_command_time = float("-inf")
+                self._act_stale_reported = False
+        else:
+            self._act_enabled = False
+            self._act_last_command_time = float("-inf")
+            self.target_pos = self.current_pos.copy()
+
+    def _act_callback(self, msg: JointTrajectory):
+        if not self._act_mode:
+            return
+        if not msg.points or len(msg.points) != 1:
+            self.get_logger().error("ACT command must contain exactly one point")
+            return
+        if (
+            len(msg.joint_names) != len(set(msg.joint_names))
+            or set(msg.joint_names) != set(ACT_ARM_JOINTS + [GRIPPER_MASTER_JOINT])
+        ):
+            self.get_logger().error("ACT command has an unexpected joint-name set")
+            return
+
+        point = msg.points[0]
+        if len(point.positions) != len(msg.joint_names):
+            self.get_logger().error("ACT command positions do not match joint names")
+            return
+        values = dict(zip(msg.joint_names, point.positions))
+        if any(not np.isfinite(float(value)) for value in values.values()):
+            self.get_logger().error("Rejected non-finite ACT command")
+            return
+
+        target = self._act_target.copy()
+        limits = {
+            "shoulder_pan_joint": (-2.0 * np.pi, 2.0 * np.pi),
+            "shoulder_lift_joint": (-2.0 * np.pi, 2.0 * np.pi),
+            "elbow_joint": (-np.pi, np.pi),
+            "wrist_1_joint": (-2.0 * np.pi, 2.0 * np.pi),
+            "wrist_2_joint": (-2.0 * np.pi, 2.0 * np.pi),
+            "wrist_3_joint": (-2.0 * np.pi, 2.0 * np.pi),
+        }
+        clamped = False
+        for name in ACT_ARM_JOINTS:
+            idx = self.name_to_idx[name]
+            requested = float(values[name])
+            lower, upper = limits[name]
+            bounded = float(np.clip(requested, lower, upper))
+            reference = float(self.current_pos[idx])
+            clipped_step = float(
+                np.clip(bounded - reference, -self._act_max_joint_step, self._act_max_joint_step)
+            )
+            if abs(bounded - requested) > 1e-9 or abs(clipped_step - (bounded - reference)) > 1e-9:
+                clamped = True
+            target[idx] = reference + clipped_step
+
+        gripper_idx = self.name_to_idx.get(GRIPPER_MASTER_JOINT)
+        if gripper_idx is None:
+            self.get_logger().error("ACT command cannot find the gripper master joint")
+            return
+        target[gripper_idx] = float(np.clip(float(values[GRIPPER_MASTER_JOINT]), 0.0, 0.8))
+
+        self._act_start_target = self.target_pos.copy()
+        self._act_target = target
+        self._act_gripper_start = float(self.target_pos[gripper_idx])
+        self._act_gripper_target = float(target[gripper_idx])
+        self._act_command_start_time = self._sim_time
+        self._act_last_command_time = self._sim_time
+        self._act_stale_reported = False
+
+        self._act_command_count += 1
+        if clamped:
+            self._act_clamp_count += 1
+        if self._act_command_count % 150 == 0:
+            self.get_logger().info(
+                f"ACT clamp observation: {self._act_clamp_count}/{self._act_command_count} "
+                f"commands limited by act_max_joint_step={self._act_max_joint_step:.3f} rad"
+            )
+
+    def _apply_gripper_drive_targets(self, master_target):
+        """Mirror the logical gripper command into the independent USD drives."""
+        for name in GRIPPER_JOINTS:
+            if name not in self.name_to_idx:
+                continue
+            if "tip" in name:
+                value = master_target if "right" in name else -master_target
+            else:
+                value = -master_target if "right" in name else master_target
+            self.target_pos[self.name_to_idx[name]] = value
+
+    def step_act(self):
+        """Apply the latest ACT target directly, with simulation-time safety guards.
+
+        空闲/超时时必须保留 ``target_pos``（上一帧插值目标），不能写成
+        ``current_pos``：把位置目标设成实测位置会让 PD 误差归零、失去抗重力力矩，
+        而每帧重设会持续跟随下沉，表现为机械臂缓慢下垂。
+        """
+        if not self._act_mode:
+            return
+        if not self._act_enabled:
+            return
+        if self._sim_time - self._act_last_command_time > self._act_watchdog_sec:
+            if not self._act_stale_reported:
+                self.get_logger().warning(
+                    f"ACT command watchdog expired after {self._act_watchdog_sec:.3f}s; holding position"
+                )
+                self._act_stale_reported = True
+            return
+
+        alpha = np.clip(
+            (self._sim_time - self._act_command_start_time) / self._act_command_period,
+            0.0,
+            1.0,
+        )
+        for name in ACT_ARM_JOINTS:
+            idx = self.name_to_idx[name]
+            self.target_pos[idx] = self._act_start_target[idx] + (
+                self._act_target[idx] - self._act_start_target[idx]
+            ) * alpha
+
+        gripper_idx = self.name_to_idx[GRIPPER_MASTER_JOINT]
+        gripper_target = self._act_gripper_start + (
+            self._act_gripper_target - self._act_gripper_start
+        ) * alpha
+        self.target_pos[gripper_idx] = gripper_target
+        self._apply_gripper_drive_targets(gripper_target)
+
     def _arm_traj_callback(self, msg: JointTrajectory):
+        if self._act_mode:
+            self.get_logger().warning("Ignoring ordinary arm trajectory while ACT mode is active")
+            return
         self._traj_points = []
         self._motion_stopped = False
         self._last_traj_joint_names = list(msg.joint_names)
@@ -277,14 +455,7 @@ class ControlNode(Node):
         idx = self.name_to_idx[GRIPPER_MASTER_JOINT]
         # The fallback USD has no physical mimic constraints, so mirror the
         # master target across the six independent joint drives.
-        for name in GRIPPER_JOINTS:
-            if name not in self.name_to_idx:
-                continue
-            if "tip" in name:
-                value = self._gripper_target if "right" in name else -self._gripper_target
-            else:
-                value = -self._gripper_target if "right" in name else self._gripper_target
-            self.target_pos[self.name_to_idx[name]] = value
+        self._apply_gripper_drive_targets(self._gripper_target)
 
         current = float(self.current_pos[idx])
         target = float(self.target_pos[idx])
@@ -336,6 +507,9 @@ class ControlNode(Node):
         self._gripper_done_pub.publish(UInt8(data=code))
 
     def _gripper_callback(self, msg: Float64):
+        if self._act_mode:
+            self.get_logger().warning("Ignoring ordinary gripper command while ACT mode is active")
+            return
         self._motion_stopped = False
         self._gripper_target = msg.data
         self._gripper_done_sent = False
@@ -344,6 +518,13 @@ class ControlNode(Node):
 
     def _stop_motion_callback(self, msg: Bool):
         if not msg.data:
+            return
+        if self._act_mode:
+            self._motion_stopped = True
+            self._act_enabled = False
+            self._act_last_command_time = float("-inf")
+            self.target_pos = self.current_pos.copy()
+            self.get_logger().warn("ACT motion stopped")
             return
         arm_was_active = self._traj_active or self._traj_settling
         gripper_was_active = not self._gripper_done_sent
@@ -379,6 +560,8 @@ class ControlNode(Node):
             self._traj_active = False
             self._traj_settling = False
             self._traj_points.clear()
+            self._act_enabled = False
+            self._act_last_command_time = float("-inf")
             self._gripper_done_sent = True
             self._gripper_start_time = self._sim_time
             self.isaaclab.reset_env()
