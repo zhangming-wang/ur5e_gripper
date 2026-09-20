@@ -4,7 +4,9 @@ UR5e 机械臂 + Robotiq 2F-85 自适应夹爪的 ROS 2 Humble 仿真项目，�
 提供三种可互换的控制模式：**MoveIt 规划**（`src/moveit/`）、**ACT 端到端策略**（`src/act/`）与
 **Diffusion Policy**（`src/diffusion/`），三者暴露同一个 `/pick_and_place` 接口。
 
-## 这是什么
+![IsaacLab UR5e pick-and-place scene](env.png)
+
+## 简介
 
 这是一个学习机器人抓取控制的仿真项目：UR5e 从左侧托盘抓取随机位置和朝向的红色 cube，将其放到
 另一侧托盘并回到 home。项目的重点是用同一套机器人、相机、场景和 ROS 接口，对比三种控制方法：
@@ -84,11 +86,11 @@ sudo apt install ros-humble-mujoco-ros2-control \
 
 项目跨三个 Python 运行时，`run.sh` 需要它们都存在（可用同名环境变量覆盖）：
 
-| 用途 | conda 环境 | Python | 说明 |
-|---|---|---|---|
-| Isaac Lab 仿真 | `ISAACLAB_ENV`（默认 `isaaclab`） | 3.11 | 自带 ROS 2 库，不要与系统 ROS 混用 |
-| ACT / Diffusion 推理与训练 | `LEROBOT_ENV`（默认 `lerobot`） | ≥3.12 | LeRobot 要求 ≥3.12，无法与系统 ROS 同进程 |
-| 其余 ROS 节点 / 面板 | 系统环境 | 3.10 | `/opt/ros/humble` |
+| 用途                       | conda 环境                        | Python | 说明                                      |
+| -------------------------- | --------------------------------- | ------ | ----------------------------------------- |
+| Isaac Lab 仿真             | `ISAACLAB_ENV`（默认 `isaaclab`） | 3.11   | 自带 ROS 2 库，不要与系统 ROS 混用        |
+| ACT / Diffusion 推理与训练 | `LEROBOT_ENV`（默认 `lerobot`）   | ≥3.12  | LeRobot 要求 ≥3.12，无法与系统 ROS 同进程 |
+| 其余 ROS 节点 / 面板       | 系统环境                          | 3.10   | `/opt/ros/humble`                         |
 
 `CONDA_ROOT` 默认 `/home/dev/miniconda3`。
 
@@ -134,12 +136,12 @@ colcon build --symlink-install
 
 `run.sh` 会导出 `ROS_DOMAIN_ID`（默认 46，可用同名环境变量覆盖）。
 
-| 模式 | 进程数 | 启动顺序 |
-|---|---|---|
-| `--isaacsim`（默认） | 7 | MoveIt → Bridge → Planning → Perception → IsaacLab → Orchestrator → Panel |
-| `--mujoco` | 6 | MoveIt → MuJoCo → Perception → Planning → Orchestrator → Panel |
-| `--act` | 5 | ACT 推理服务 → IsaacLab `--act` → act_orchestrator → act_ros_adapter → Panel |
-| `--diffusion` | 5 | Diffusion 推理服务 → IsaacLab `--diffusion` → diffusion_orchestrator → diffusion_ros_adapter → Panel |
+| 模式                 | 进程数 | 启动顺序                                                                                             |
+| -------------------- | ------ | ---------------------------------------------------------------------------------------------------- |
+| `--isaacsim`（默认） | 7      | MoveIt → Bridge → Planning → Perception → IsaacLab → Orchestrator → Panel                            |
+| `--mujoco`           | 6      | MoveIt → MuJoCo → Perception → Planning → Orchestrator → Panel                                       |
+| `--act`              | 5      | ACT 推理服务 → IsaacLab `--act` → act_orchestrator → act_ros_adapter → Panel                         |
+| `--diffusion`        | 5      | Diffusion 推理服务 → IsaacLab `--diffusion` → diffusion_orchestrator → diffusion_ros_adapter → Panel |
 
 按 `Ctrl+C` 全部停止。
 
@@ -149,12 +151,12 @@ colcon build --symlink-install
 所以面板的单次/循环抓取逻辑通用。**一个 goal = 一轮**；循环模式由面板在成功后重发 goal，
 失败则停止循环。
 
-| | MoveIt 模式（`--isaacsim` / `--mujoco`） | ACT 模式（`--act`） | Diffusion 模式（`--diffusion`） |
-|---|---|---|---|
-| 决策 | 感知检测 → 几何位姿 → MoveIt 规划 | 端到端策略直接输出关节角 | 两帧观测条件下采样关节角动作块 |
-| 频率 | 低频（一次规划一整段轨迹） | 15Hz 连续闭环 | 15Hz 连续闭环 |
-| 完成判定 | 11 步流水线跑完 | 关节先离开、再回到 home | 关节先离开、再回到 home |
-| 需要的感知 | RGB + 深度 + HSV 检测 | 只要 RGB + 关节状态 | 两帧 RGB + 两帧关节状态 |
+|            | MoveIt 模式（`--isaacsim` / `--mujoco`） | ACT 模式（`--act`）      | Diffusion 模式（`--diffusion`） |
+| ---------- | ---------------------------------------- | ------------------------ | ------------------------------- |
+| 决策       | 感知检测 → 几何位姿 → MoveIt 规划        | 端到端策略直接输出关节角 | 两帧观测条件下采样关节角动作块  |
+| 频率       | 低频（一次规划一整段轨迹）               | 15Hz 连续闭环            | 15Hz 连续闭环                   |
+| 完成判定   | 11 步流水线跑完                          | 关节先离开、再回到 home  | 关节先离开、再回到 home         |
+| 需要的感知 | RGB + 深度 + HSV 检测                    | 只要 RGB + 关节状态      | 两帧 RGB + 两帧关节状态         |
 
 ACT 模式的完整说明（ACT 原理、数据流水线、训练与评估、换模型要改什么）见
 [`src/act/README.md`](src/act/README.md)；Diffusion 模式说明见
@@ -165,10 +167,10 @@ ACT 模式的完整说明（ACT 原理、数据流水线、训练与评估、换
 模型选择取决于任务形态、数据规模和控制精度，而不仅是模型参数量。当前数据集包含 52 个单任务
 pick-and-place episode：固定场景中抓取红色 cube、放入目标托盘并回 home。
 
-| 场景 | 更合适的方向 | 原因 |
-|---|---|---|
-| 固定、重复、要求精确抓取的单任务 | ACT | 直接稳定地复现示范关节轨迹，当前任务下通常比采样式策略平滑。 |
-| 存在多条合理轨迹、动作分布更复杂 | Diffusion Policy | 可以生成多模态动作块，但需要更多高质量示范和稳定的 chunk 衔接。 |
+| 场景                             | 更合适的方向      | 原因                                                                       |
+| -------------------------------- | ----------------- | -------------------------------------------------------------------------- |
+| 固定、重复、要求精确抓取的单任务 | ACT               | 直接稳定地复现示范关节轨迹，当前任务下通常比采样式策略平滑。               |
+| 存在多条合理轨迹、动作分布更复杂 | Diffusion Policy  | 可以生成多模态动作块，但需要更多高质量示范和稳定的 chunk 衔接。            |
 | 同一机器人需要按文字执行不同任务 | VLA，例如 SmolVLA | 将语言指令、图像和关节状态一起作为条件；固定文字指令对单任务没有额外信息。 |
 
 Diffusion 模式默认使用 20 步去噪、32 步动作块和 15 Hz 发布。为避免旧观测造成阶段错乱，默认在
@@ -252,13 +254,13 @@ ros2 service call /plan_execute custom_msgs/srv/PlanExecute \
 
 ## 命令速查
 
-| command_type | data 格式                      | 单位     |
-| ------------ | ------------------------------ | -------- |
-| `ik_rel`   | `dx dy dz droll dpitch dyaw` | 米 / 度  |
-| `ik_abs`   | `x y z roll pitch yaw`       | 米 / 度  |
-| `fk_rel`   | `dj1 dj2 dj3 dj4 dj5 dj6`    | 度       |
-| `fk_abs`   | `j1 j2 j3 j4 j5 j6`          | 度       |
-| `gripper`  | `position`                   | 0.0～0.8 |
+| command_type | data 格式                    | 单位     |
+| ------------ | ---------------------------- | -------- |
+| `ik_rel`     | `dx dy dz droll dpitch dyaw` | 米 / 度  |
+| `ik_abs`     | `x y z roll pitch yaw`       | 米 / 度  |
+| `fk_rel`     | `dj1 dj2 dj3 dj4 dj5 dj6`    | 度       |
+| `fk_abs`     | `j1 j2 j3 j4 j5 j6`          | 度       |
+| `gripper`    | `position`                   | 0.0～0.8 |
 
 ---
 
