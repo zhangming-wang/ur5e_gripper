@@ -1,8 +1,4 @@
-"""
-Launch Isaac Lab with the UR5e + Robotiq 2F-85 USD stage.
-Normal mode hosts the FollowJointTrajectory execution path.  ACT mode accepts
-direct targets from the standalone ACT ROS adapter.
-"""
+"""Launch Isaac Lab with MoveIt, ACT, or Diffusion Policy control paths."""
 
 import argparse
 from pathlib import Path
@@ -21,8 +17,15 @@ parser.add_argument(
     action="store_true",
     help="Enable direct ACT control input instead of the MoveIt trajectory path",
 )
+parser.add_argument(
+    "--diffusion",
+    action="store_true",
+    help="Enable direct Diffusion Policy input instead of the MoveIt trajectory path",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+if args_cli.act and args_cli.diffusion:
+    parser.error("--act and --diffusion cannot be used together")
 args_cli.enable_cameras = True  # 必须启用，否则相机不渲染
 
 # ----------------------------------------------------------------------
@@ -281,7 +284,12 @@ class MainLoop:
         print(f"总关节数: {num_joints}\n")
 
         self.ros_executor = SingleThreadedExecutor()
-        self.control_node = ControlNode(self, joint_names, act_mode=args_cli.act)
+        self.control_node = ControlNode(
+            self,
+            joint_names,
+            act_mode=args_cli.act,
+            diffusion_mode=args_cli.diffusion,
+        )
         self.ros_executor.add_node(self.control_node)
 
         self._init_robot()
@@ -300,6 +308,8 @@ class MainLoop:
 
             if args_cli.act:
                 self.control_node.step_act()
+            elif args_cli.diffusion:
+                self.control_node.step_diffusion()
             else:
                 self.control_node.step_traj()
                 self.control_node.step_gripper()

@@ -9,6 +9,12 @@ ISAACLAB_ENV="${ISAACLAB_ENV:-isaaclab}"
 LEROBOT_ENV="${LEROBOT_ENV:-lerobot}"
 ACT_CHECKPOINT="${ACT_CHECKPOINT:-$PROJECT_DIR/outputs/ur5e_act_rgb_abs_novae/checkpoints/030000/pretrained_model}"
 ACT_PORT="${ACT_PORT:-27655}"
+DIFFUSION_CHECKPOINT="${DIFFUSION_CHECKPOINT:-$PROJECT_DIR/outputs/ur5e_diffusion_abs/checkpoints/030000/pretrained_model}"
+DIFFUSION_PORT="${DIFFUSION_PORT:-27658}"
+DIFFUSION_INFERENCE_STEPS="${DIFFUSION_INFERENCE_STEPS:-20}"
+DIFFUSION_PREFETCH_THRESHOLD="${DIFFUSION_PREFETCH_THRESHOLD:-0}"
+DIFFUSION_BLEND_STEPS="${DIFFUSION_BLEND_STEPS:-4}"
+DIFFUSION_GRIPPER_CONFIRM_STEPS="${DIFFUSION_GRIPPER_CONFIRM_STEPS:-3}"
 
 # export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-46}"
@@ -84,11 +90,12 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 usage() {
-    echo "用法: $0 [--isaacsim | --mujoco | --act]"
+    echo "用法: $0 [--isaacsim | --mujoco | --act | --diffusion]"
     echo "  不传参数时默认使用 Isaac Sim"
     echo "  --isaacsim    Isaac Lab 仿真 (MoveIt 闭环)"
     echo "  --mujoco      MuJoCo 仿真 (MoveIt 闭环)"
     echo "  --act         ACT 策略直接控制 Isaac Lab"
+    echo "  --diffusion   Diffusion Policy 直接控制 Isaac Lab"
     exit 1
 }
 
@@ -96,6 +103,7 @@ case "${1:-}" in
     --isaacsim) MODE="isaacsim" ;;
     --mujoco)   MODE="mujoco" ;;
     --act)      MODE="act" ;;
+    --diffusion) MODE="diffusion" ;;
     "")         MODE="isaacsim" ;;
     *)          usage ;;
 esac
@@ -104,7 +112,7 @@ if [ ! -f "$INSTALL_DIR/setup.bash" ]; then
     echo "[ERROR] Missing $INSTALL_DIR/setup.bash; build the workspace first" >&2
     exit 1
 fi
-if [ "$MODE" = "isaacsim" ] || [ "$MODE" = "act" ]; then
+if [ "$MODE" = "isaacsim" ] || [ "$MODE" = "act" ] || [ "$MODE" = "diffusion" ]; then
     if [ ! -f "$CONDA_ROOT/etc/profile.d/conda.sh" ]; then
         echo "[ERROR] Conda initialization script not found: $CONDA_ROOT/etc/profile.d/conda.sh" >&2
         exit 1
@@ -124,6 +132,15 @@ if [ "$MODE" = "isaacsim" ] || [ "$MODE" = "act" ]; then
             echo "[ERROR] ACT checkpoint not found: $ACT_CHECKPOINT" >&2
             exit 1
         fi
+    elif [ "$MODE" = "diffusion" ]; then
+        if ! conda run -n "$LEROBOT_ENV" true >/dev/null 2>&1; then
+            echo "[ERROR] Conda environment not found: $LEROBOT_ENV" >&2
+            exit 1
+        fi
+        if [ ! -f "$DIFFUSION_CHECKPOINT/config.json" ] || [ ! -f "$DIFFUSION_CHECKPOINT/model.safetensors" ]; then
+            echo "[ERROR] Diffusion checkpoint not found: $DIFFUSION_CHECKPOINT" >&2
+            exit 1
+        fi
     fi
 fi
 
@@ -133,7 +150,7 @@ echo "  模式: $MODE"
 echo "  ROS_DOMAIN_ID: $ROS_DOMAIN_ID"
 echo "=============================================="
 
-if [ "$MODE" != "act" ]; then
+if [ "$MODE" != "act" ] && [ "$MODE" != "diffusion" ]; then
     # ---- MoveIt (共用) ----
     echo "[1] 启动 MoveIt..."
     if [ "$MODE" = "mujoco" ]; then
@@ -278,6 +295,54 @@ elif [ "$MODE" = "act" ]; then
         source /opt/ros/humble/setup.bash
         source '$INSTALL_DIR/setup.bash'
         ros2 run act act_ros_adapter --server-url http://127.0.0.1:'$ACT_PORT'
+    "
+
+    # ---- 调试面板 ----
+    echo "[5] 启动调试面板..."
+    start_job "
+        source /opt/ros/humble/setup.bash
+        source '$INSTALL_DIR/setup.bash'
+        python3 '$PROJECT_DIR/script/panel.py'
+    "
+
+elif [ "$MODE" = "diffusion" ]; then
+
+    # ---- Diffusion 推理服务 (lerobot 环境, 非 ROS) ----
+    echo "[1] 启动 Diffusion 推理服务..."
+    start_job "
+        source '$CONDA_ROOT/etc/profile.d/conda.sh'
+        conda activate '$LEROBOT_ENV'
+        cd '$PROJECT_DIR' && python3 script/diffusion_policy_server.py \
+            --checkpoint '$DIFFUSION_CHECKPOINT' --port '$DIFFUSION_PORT' \
+            --num-inference-steps '$DIFFUSION_INFERENCE_STEPS'
+    "
+
+    # ---- IsaacLab (Diffusion 模式) ----
+    echo "[2] 启动 IsaacLab (Diffusion 模式)..."
+    start_job "
+        source '$CONDA_ROOT/etc/profile.d/conda.sh'
+        conda activate '$ISAACLAB_ENV'
+        cd '$PROJECT_DIR' && python3 isaaclab/src/run_isaaclab.py --diffusion
+    "
+
+    # ---- Diffusion 编排节点 (系统 ROS) ----
+    echo "[3] 启动 Diffusion 编排节点..."
+    start_job "
+        source /opt/ros/humble/setup.bash
+        source '$INSTALL_DIR/setup.bash'
+        ros2 run diffusion diffusion_orchestrator
+    "
+
+    # ---- Diffusion 策略执行器 (系统 ROS) ----
+    echo "[4] 启动 Diffusion 策略执行器..."
+    start_job "
+        source /opt/ros/humble/setup.bash
+        source '$INSTALL_DIR/setup.bash'
+        ros2 run diffusion diffusion_ros_adapter \
+            --server-url http://127.0.0.1:'$DIFFUSION_PORT' \
+            --prefetch-threshold '$DIFFUSION_PREFETCH_THRESHOLD' \
+            --blend-steps '$DIFFUSION_BLEND_STEPS' \
+            --gripper-confirm-steps '$DIFFUSION_GRIPPER_CONFIRM_STEPS'
     "
 
     # ---- 调试面板 ----

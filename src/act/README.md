@@ -1,8 +1,8 @@
 # act — ACT 端到端控制模式
 
-与 `src/moveit`（MoveIt 规划模式）并列的第二种控制模式。两者都提供同名的
-`/pick_and_place`（`custom_msgs/action/PickAndPlace`），因此 `script/panel.py`
-的单次/循环抓取逻辑对两种模式通用。
+与 `src/moveit`（MoveIt 规划模式）和 `src/diffusion`（Diffusion Policy 模式）并列的
+端到端控制模式。三种模式都提供同名的 `/pick_and_place`
+（`custom_msgs/action/PickAndPlace`），因此 `script/panel.py` 的单次/循环抓取逻辑通用。
 
 ---
 

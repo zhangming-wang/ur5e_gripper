@@ -1,7 +1,7 @@
 # AGENTS.md — ur5e_gripper
 
-UR5e + Robotiq 2F-85 simulation (ROS 2 Humble + Isaac Lab + MuJoCo) with two interchangeable
-control modes: MoveIt planning (`src/moveit/`) and an ACT end-to-end policy (`src/act/`).
+UR5e + Robotiq 2F-85 simulation (ROS 2 Humble + Isaac Lab + MuJoCo) with three interchangeable
+control modes: MoveIt planning (`src/moveit/`), ACT (`src/act/`), and Diffusion Policy (`src/diffusion/`).
 
 ## Runtime split
 
@@ -9,6 +9,9 @@ control modes: MoveIt planning (`src/moveit/`) and an ACT end-to-end policy (`sr
 - **`src/act/`** — ACT control mode: ROS nodes only (`act_orchestrator`, `act_ros_adapter`).
   Policy inference runs in conda env `lerobot` (Py3.12) via `script/act_policy_server.py`;
   LeRobot requires Python ≥3.12, so it can never run in the same process as system ROS.
+- **`src/diffusion/`** — Diffusion control mode: ROS nodes only (`diffusion_orchestrator`,
+  `diffusion_ros_adapter`). Policy inference runs in the same `lerobot` environment via
+  `script/diffusion_policy_server.py`, but uses independent topics and port `27658`.
 - **`isaaclab/`** — standalone Isaac Lab app (not a colcon package), runs in conda env `isaaclab` (Python 3.11) with its own bundled ROS 2 libraries.
 - **`mujoco/`** — standalone colcon package at repo root (discovered alongside `src/`). Provides the ros2_control backend: MJCF scene, URDF, launch, and controller config.
 - All ROS processes share `ROS_DOMAIN_ID`; `run.sh` exports it (default `46`).
@@ -26,15 +29,16 @@ source install/setup.bash
 - Active colcon packages are discovered under `src/` and `mujoco/`; `build/`, `install/`, `log/` are generated and ignored.
 - `COLCON_IGNORE` markers: `third_party/`, `src/moveit/trac_ik/trac_ik_examples/`, `src/moveit/trac_ik/trac_ik_python/`.
 - No colcon tests are registered anywhere in the repo (`colcon test` has nothing to run).
-- `./run.sh` defaults to **Isaac Sim** (7 processes: MoveIt → Bridge → Planning → Perception → IsaacLab → Orchestrator → `script/panel.py`). `./run.sh --mujoco` uses MuJoCo (6 processes). `./run.sh --act` runs the ACT mode (5 processes: policy server → IsaacLab `--act` → `act_orchestrator` → `act_ros_adapter` → `script/panel.py`); it skips MoveIt/Bridge/Planning/Perception/Orchestrator. Ctrl+C stops all.
+- `./run.sh` defaults to **Isaac Sim** (7 processes: MoveIt → Bridge → Planning → Perception → IsaacLab → Orchestrator → `script/panel.py`). `./run.sh --mujoco` uses MuJoCo (6 processes). `./run.sh --act` runs the ACT mode (5 processes: policy server → IsaacLab `--act` → `act_orchestrator` → `act_ros_adapter` → `script/panel.py`). `./run.sh --diffusion` runs the independent Diffusion mode (5 processes: policy server → IsaacLab `--diffusion` → `diffusion_orchestrator` → `diffusion_ros_adapter` → `script/panel.py`). The two direct-policy modes skip MoveIt/Bridge/Planning/Perception/MoveIt Orchestrator. Ctrl+C stops all.
 - ACT mode parameters: `ACT_CHECKPOINT` (default `outputs/ur5e_act_rgb_abs_novae/checkpoints/030000/pretrained_model`), `ACT_PORT` (default `27655`), `LEROBOT_ENV`.
+- Diffusion mode parameters: `DIFFUSION_CHECKPOINT` (default `outputs/ur5e_diffusion_abs/checkpoints/030000/pretrained_model`), `DIFFUSION_PORT` (default `27658`), `DIFFUSION_INFERENCE_STEPS` (default `20`), `DIFFUSION_PREFETCH_THRESHOLD` (default `0`), `DIFFUSION_BLEND_STEPS` (default `4`), and `DIFFUSION_GRIPPER_CONFIRM_STEPS` (default `3`).
 - `script/panel.py` requires PySide6 and must run under system ROS Python (not `isaaclab` conda env).
 
 ## Ownership & flow
 
 | Directory | Package | Role |
 |---|---|---|
-| `src/custom_msgs/` | `custom_msgs` | Service + action definitions (shared by both modes) |
+| `src/custom_msgs/` | `custom_msgs` | Service + action definitions (shared by all modes) |
 | `src/moveit/description/` | `description` | URDF/XACRO, meshes |
 | `src/moveit/moveit_config/` | `moveit_config` | MoveIt 2 launch + config (TRAC-IK kinematics) |
 | `src/moveit/planning/` | `planning` | `planning_node` (IK/FK/gripper via `/plan_execute`) |
@@ -43,16 +47,17 @@ source install/setup.bash
 | `src/moveit/pymoveit2/` | `pymoveit2` | Local fork of MoveIt2 Python client (v4.2.0, not a pip package) |
 | `src/moveit/trac_ik/` | `trac_ik_lib`, `trac_ik_kinematics_plugin`, `trac_ik` | TRAC-IK IK solver (replaces KDL) |
 | `src/act/` | `act` | ACT mode: `act_orchestrator` (`/pick_and_place`) + `act_ros_adapter` (policy executor) |
+| `src/diffusion/` | `diffusion` | Diffusion mode: `diffusion_orchestrator` (`/pick_and_place`) + `diffusion_ros_adapter` (policy executor) |
 | `src/recorder/` | `recorder` | LeRobot raw episode recorder (data collection only, not launched by `run.sh`) |
 | `isaaclab/src/` | — | `run_isaaclab.py` (sim entrypoint), `control_node.py` (ROS node in sim), `bridge_node.py` (action server) |
 | `mujoco/` | `mujoco` | MJCF scene, URDF, launch, and controller config; builds C++ `mujoco_scene_plugin` (serves `/spawn_cube` and `/reset`). `run_mujoco.py` — standalone MuJoCo viewer (conda env `mujoco`). |
-| `script/` | — | `panel.py` (PySide6 debug/control GUI), `act_policy_server.py` (LeRobot-env HTTP inference server) |
+| `script/` | — | `panel.py` (PySide6 debug/control GUI), ACT and Diffusion LeRobot-env HTTP inference servers |
 | `tools/` | — | `lerobot_convert.py` (raw_data → LeRobotDataset) |
 | `third_party/` | — | Git submodules (`mujoco_menagerie`, `ros2_robotiq_gripper`, `Universal_Robots_ROS2_*`) |
 
 ## Live ROS contracts
 
-- **`/pick_and_place`** — `custom_msgs/action/PickAndPlace`. **Two interchangeable servers implement it** (never both running): `src/moveit/orchestrator` (MoveIt pipeline) and `src/act/act_orchestrator` (one ACT cycle: `/reset` → `/spawn_cube` → prepare → enable → wait for home). **One goal = one cycle** (both break after a successful cycle); `script/panel.py` loop mode resubmits a new goal 500 ms after success and stops the loop on failure.
+- **`/pick_and_place`** — `custom_msgs/action/PickAndPlace`. **Three interchangeable servers implement it** (never run together): `src/moveit/orchestrator` (MoveIt pipeline), `src/act/act_orchestrator` (one ACT cycle), and `src/diffusion/diffusion_orchestrator` (one Diffusion cycle). Each runs `/reset` → `/spawn_cube` → prepare → enable → wait for home. **One goal = one cycle**; `script/panel.py` loop mode resubmits a new goal 500 ms after success and stops the loop on failure.
 - **`/plan_execute`** — `custom_msgs/srv/PlanExecute` (MoveIt mode only). Valid types: `ik_abs`, `ik_rel`, `fk_abs`, `fk_rel`, `gripper`. Positions are meters, **angles/RPY are degrees**, all arm commands take 6 space-separated values.
 - **`/detect_object`** — `custom_msgs/srv/DetectObject` (MoveIt mode only). Returns x/y/z (meters) and **yaw in radians** — convert with `math.degrees()` before passing to `/plan_execute`.
 - **`/spawn_cube`** and **`/reset`** — use `std_srvs/srv/Trigger` (not `custom_msgs/srv/SpawnCube`, which exists but is unused). Served by IsaacLab `control_node` in sim mode and by the MuJoCo `mujoco_scene_plugin` in MuJoCo mode.
@@ -72,6 +77,7 @@ source install/setup.bash
 - The MuJoCo MJCF must keep actuator names synced with the ros2_control joint list in `mujoco/urdf/`. The gripper uses a tendon-based position actuator named `robotiq_85_left_knuckle_joint` (matching the URDF/MoveIt joint), driven by `robotiq_gripper_controller` (`GripperActionController`).
 - **ACT**: `act_orchestrator` owns the cycle and publishes `/isaaclab/act/enabled` (`Bool`); `act_ros_adapter` subscribes to it, serves `/act_ros_adapter/prepare` (pre-warm one chunk), and publishes `/isaaclab/act/joint_target` (`JointTrajectory`, one 7-joint point). In `--act` mode `control_node` ignores `/arm_controller/joint_trajectory` and `/gripper_controller/command`, clamps per-step motion (`act_max_joint_step`, default `0.15` rad), interpolates over `act_command_period`, and holds position on an `act_watchdog_sec` (default `0.5`s) timeout. The adapter maps predicted gripper to `0.0`/`0.8` (the dataset stores measured knuckle position, ~0.63 at contact, not the command).
 - ACT completion is inferred from joint state, not a fixed delay: the arm must first leave home (`>0.3` rad), then return within `0.2` rad and stay settled for `1.0`s; a `60`s `cycle_timeout` aborts the cycle. Home is `[0, -1.5708, 1.5708, 0, 1.5708, 0]` (equals `control_node.init_pos` and the training-data end pose).
+- **Diffusion**: `diffusion_orchestrator` owns the same cycle semantics, but uses `/isaaclab/diffusion/enabled`, `/diffusion_ros_adapter/prepare`, and `/isaaclab/diffusion/joint_target`. The adapter sends the latest two synchronized RGB/state observations to the server, which returns 32 absolute actions. The adapter publishes at 15 Hz and, by default, requests the next chunk only after the current one drains so the observation is current; `control_node` uses separate `diffusion_*` watchdog, interpolation, and limit state.
 
 ## Known gotchas
 
