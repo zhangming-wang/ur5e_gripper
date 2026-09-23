@@ -20,6 +20,16 @@ Diffusion  两帧 RGB + 关节状态 -> 生成关节动作块
 你可以从中学习 ROS 2 节点与 action/service、IsaacLab 仿真、MoveIt 规划、LeRobot 数据采集与转换，
 以及 ACT 和 Diffusion Policy 的训练、离线评估和闭环部署。项目只在仿真中验证，不代表真实机器人性能。
 
+## 演示
+
+### MoveIt 规划
+
+![MoveIt pick-and-place demo](doc/moveit.gif)
+
+### ACT 端到端控制
+
+![ACT pick-and-place demo](doc/act.gif)
+
 ## 快速开始
 
 ```bash
